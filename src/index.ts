@@ -5,7 +5,8 @@ import {
   GuildMember,
   REST,
   Routes,
-  SlashCommandBuilder
+  SlashCommandBuilder,
+  PermissionFlagsBits
 } from 'discord.js'
 import dotenv from 'dotenv'
 import cron from 'node-cron'
