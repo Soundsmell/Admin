@@ -39,6 +39,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName('draw')
     .setDescription('즉시 랜덤 유저 2명을 추첨합니다.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator) // 관리자 권한 필요
 ]
 
 client.once('ready', async () => {
