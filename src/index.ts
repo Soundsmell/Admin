@@ -9,8 +9,21 @@ import {
 } from 'discord.js'
 import dotenv from 'dotenv'
 import cron from 'node-cron'
+import express from 'express'
 
 dotenv.config()
+
+// Koyeb 등 PaaS 배포를 위한 가상 웹 서버 설정 (Port Binding)
+const app = express()
+const PORT = process.env.PORT || 8000
+
+app.get('/', (req, res) => {
+  res.send('Discord Bot is alive!')
+})
+
+app.listen(PORT, () => {
+  console.log(`Web server is listening on port ${PORT}`)
+})
 
 // 봇 클라이언트 초기화
 const client = new Client({
