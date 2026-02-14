@@ -65,7 +65,7 @@ client.once('ready', async () => {
   }
 
   cron.schedule(
-    '0 0 * * *',
+    '0 20 * * *',
     async () => {
       console.log('Running daily task...')
       await runDailyTask()
