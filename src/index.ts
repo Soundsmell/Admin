@@ -108,8 +108,10 @@ async function runDailyTask(targetChannelId?: string) {
     // 모든 멤버 가져오기
     await guild.members.fetch()
 
-    // 봇을 제외한 멤버 필터링
-    const candidates = guild.members.cache.filter(member => !member.user.bot)
+    // 봇과 서버장을 제외한 멤버 필터링
+    const candidates = guild.members.cache.filter(
+      member => !member.user.bot && member.id !== guild.ownerId
+    )
 
     if (candidates.size < 2) {
       await channel.send(
