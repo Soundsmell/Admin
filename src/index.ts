@@ -39,7 +39,7 @@ const client = new Client({
 const commands = [
   new SlashCommandBuilder()
     .setName('draw')
-    .setDescription('즉시 랜덤 유저 2명을 추첨합니다.')
+    .setDescription('즉시 랜덤 유저 3명을 추첨합니다.')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator) // 관리자 권한 필요
 ]
 
@@ -113,15 +113,15 @@ async function runDailyTask(targetChannelId?: string) {
       member => !member.user.bot && member.id !== guild.ownerId
     )
 
-    if (candidates.size < 2) {
+    if (candidates.size < 3) {
       await channel.send(
-        '추첨을 진행하기에 멤버(봇 제외)가 충분하지 않습니다 (최소 2명 필요).'
+        '추첨을 진행하기에 멤버(봇/서버장 제외)가 충분하지 않습니다 (최소 3명 필요).'
       )
       return
     }
 
-    // 랜덤하게 2명 뽑기
-    const winners = candidates.random(2) as GuildMember[]
+    // 랜덤하게 3명 뽑기
+    const winners = candidates.random(3) as GuildMember[]
 
     // 메시지 출력
     const messageContent = `오늘의 독재자 명단: ${winners.map(w => w.toString()).join(', ')}`
