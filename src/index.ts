@@ -55,7 +55,7 @@ client.once('ready', async () => {
       for (const [guildId, guild] of guilds) {
         await rest.put(
           Routes.applicationGuildCommands(client.user.id, guildId),
-          { body: commands }
+          { body: commands.map(command => command.toJSON()) }
         )
         console.log(`Registered commands for guild: ${guild.name} (${guildId})`)
       }
