@@ -5,7 +5,7 @@ import {
   EmbedBuilder
 } from 'discord.js'
 import { Pool } from 'pg'
-import MeCab from 'mecab-ya'
+import MeCab = require('mecab-ya')
 
 export type Period = 'day' | 'week' | 'month' | 'all'
 export type Scope = 'user' | 'guild'
