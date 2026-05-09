@@ -32,18 +32,29 @@ type ParticipantPageResult = {
   hasNext: boolean
 }
 
+let mecabAvailable = false
 const mecab = (() => {
   const MecabCtor = MeCabModule?.MeCab || MeCabModule?.default || MeCabModule
   if (typeof MecabCtor === 'function') {
     try {
-      return new MecabCtor()
+      const instance = new MecabCtor()
+      if (instance?.parse) {
+        mecabAvailable = true
+        return instance
+      }
     } catch (error) {
       // Fall back to module instance if it isn't a constructor
     }
   }
-  if (MeCabModule?.parse) return MeCabModule
-  if (MecabCtor?.parse) return MecabCtor
-  throw new Error('mecab-ya export is not compatible with this runtime.')
+  if (MeCabModule?.parse) {
+    mecabAvailable = true
+    return MeCabModule
+  }
+  if (MecabCtor?.parse) {
+    mecabAvailable = true
+    return MecabCtor
+  }
+  return null
 })()
 const databaseUrl = process.env.DATABASE_URL
 const pool = new Pool({
@@ -78,7 +89,18 @@ function isValidWord(word: string, pos: string) {
   return true
 }
 
+function fallbackTokenize(text: string) {
+  return text
+    .split(/\s+/)
+    .map(token => token.trim())
+    .filter(token => token.length > 0)
+}
+
 async function analyzeWords(text: string): Promise<string[]> {
+  if (!mecabAvailable || !mecab) {
+    return fallbackTokenize(text)
+  }
+
   return new Promise((resolve, reject) => {
     mecab.parse(text, (err: Error | null, result: string[][]) => {
       if (err) return reject(err)
