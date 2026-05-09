@@ -8,5 +8,5 @@ declare module 'mecab-ya' {
     ): void
   }
 
-  export default MeCab
+  export = MeCab
 }
