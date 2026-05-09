@@ -51,6 +51,7 @@ const DRAW_COUNT_MIN = 1
 const DRAW_COUNT_MAX = 10
 const BONUS_DRAW_CHANCE = 0.02
 const BONUS_DRAW_EXTRA_COUNT = 3
+const DRAW_BLACKLIST_USER_IDS = new Set(['1238637139856592917'])
 const DEFAULT_AUTO_DRAW_TIME = '20:00'
 const AUTO_DRAW_TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/
 
@@ -481,7 +482,6 @@ function unscheduleAutoDraw(guildId: string) {
   const existing = autoDrawTasks.get(guildId)
   if (!existing) return
   existing.stop()
-  existing.destroy()
   autoDrawTasks.delete(guildId)
 }
 
@@ -607,12 +607,13 @@ async function handleParticipantsButton(interaction: ButtonInteraction) {
   const parsed = parseParticipantsCustomId(interaction.customId)
   if (!parsed) return false
 
-  const guildContext = ensureGuildContext(interaction)
-  if (guildContext === 'no-guild-id') {
+  const guildId = interaction.guildId
+  if (!guildId) {
     await replyGuildOnly(interaction)
     return true
   }
-  if (guildContext === 'no-guild') {
+  const guild = interaction.guild
+  if (!guild) {
     await replyGuildUnavailable(interaction)
     return true
   }
@@ -627,16 +628,16 @@ async function handleParticipantsButton(interaction: ButtonInteraction) {
     period: parsed.period,
     page: nextPage,
     pageSize: PARTICIPANT_PAGE_SIZE,
-    guildId: interaction.guildId
+    guildId
   })
 
   const userId = result.userIds[0]
   const member = userId
-    ? await interaction.guild.members.fetch(userId).catch(() => null)
+    ? await guild.members.fetch(userId).catch(() => null)
     : null
   const embed = buildParticipantsEmbed({
     period: parsed.period,
-    guildName: interaction.guild?.name,
+    guildName: guild.name,
     totalCount: result.totalCount,
     page: nextPage,
     memberName: member?.displayName ?? '알 수 없음',
@@ -670,12 +671,13 @@ async function handleStatsButton(interaction: ButtonInteraction) {
   const parsed = parseStatsCustomId(interaction.customId)
   if (!parsed) return false
 
-  const guildContext = ensureGuildContext(interaction)
-  if (guildContext === 'no-guild-id') {
+  const guildId = interaction.guildId
+  if (!guildId) {
     await replyGuildOnly(interaction)
     return true
   }
-  if (guildContext === 'no-guild') {
+  const guild = interaction.guild
+  if (!guild) {
     await replyGuildUnavailable(interaction)
     return true
   }
@@ -693,16 +695,13 @@ async function handleStatsButton(interaction: ButtonInteraction) {
     page: nextPage,
     pageSize: PAGE_SIZE,
     userId: interaction.user.id,
-    guildId: interaction.guildId
+    guildId
   })
 
   const member =
-    parsed.scope === 'user'
-      ? await interaction.guild.members.fetch(interaction.user.id)
-      : null
-  const guild = interaction.guild
+    parsed.scope === 'user' ? await guild.members.fetch(interaction.user.id) : null
   const targetLabel =
-    parsed.scope === 'user' ? `<@${interaction.user.id}>` : (guild?.name ?? '서버')
+    parsed.scope === 'user' ? `<@${interaction.user.id}>` : guild.name
   const customBase = makeCustomBase(
     parsed.ownerId,
     parsed.scope,
@@ -911,15 +910,25 @@ async function handleAutoDrawSetupCommand(
 }
 
 async function handleUnexpectedInteractionError(
-  interaction: ButtonInteraction | ChatInputCommandInteraction,
+  interaction:
+    | ButtonInteraction
+    | ChatInputCommandInteraction
+    | ModalSubmitInteraction,
   error: unknown
 ) {
   console.error('interactionCreate failed:', error)
   try {
-    await safeReply(interaction, {
-      content: '처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
-      ephemeral: true
-    })
+    if (interaction.isModalSubmit()) {
+      await interaction.reply({
+        content: '처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
+        ephemeral: true
+      })
+    } else {
+      await safeReply(interaction, {
+        content: '처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
+        ephemeral: true
+      })
+    }
   } catch (replyError) {
     console.error('Failed to send error reply:', replyError)
   }
@@ -1182,9 +1191,12 @@ async function runDailyTask(
 
     const restrictedSet = new Set(restrictedUserIds)
 
-    // 봇과 서버장을 제외한 멤버 필터링
+    // 봇, 서버장, 블랙리스트 유저를 제외한 멤버 필터링
     let candidates = guild.members.cache.filter(
-      member => !member.user.bot && member.id !== guild.ownerId
+      member =>
+        !member.user.bot &&
+        member.id !== guild.ownerId &&
+        !DRAW_BLACKLIST_USER_IDS.has(member.id)
     )
 
     if (restrictedSet.size > 0) {
