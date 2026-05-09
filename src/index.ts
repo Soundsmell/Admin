@@ -1215,10 +1215,15 @@ async function runDailyTask(
       return
     }
 
+    // 당일 요일 구하기
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토']
+    const today = new Date()
+    const dayName = dayNames[today.getDay()] // 0=일, 1=월, ..., 6=토
+    
     // 메시지 출력
-    const bonusLabel = bonusTriggered ? ' 🎉 보너스 이벤트 발동! +3명 추가 당첨' : ''
+    const bonusLabel = bonusTriggered ? `피의 ${dayName}요일, 3명의 독재자 추가 ` : ''
     const messageContent = `오늘의 독재자 명단: ${winners.map(w => w.toString()).join(', ')}${bonusLabel}`
-
+    
     await channel.send(messageContent)
   } catch (error) {
     console.error('Error in daily task:', error)
