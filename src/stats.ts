@@ -5,7 +5,7 @@ import {
   EmbedBuilder
 } from 'discord.js'
 import { Pool } from 'pg'
-const MeCab = require('mecab-ya')
+const MeCabModule = require('mecab-ya')
 
 export type Period = 'day' | 'week' | 'month' | 'all'
 export type Scope = 'user' | 'guild'
@@ -32,7 +32,19 @@ type ParticipantPageResult = {
   hasNext: boolean
 }
 
-const mecab = new MeCab()
+const mecab = (() => {
+  const MecabCtor = MeCabModule?.MeCab || MeCabModule?.default || MeCabModule
+  if (typeof MecabCtor === 'function') {
+    try {
+      return new MecabCtor()
+    } catch (error) {
+      // Fall back to module instance if it isn't a constructor
+    }
+  }
+  if (MeCabModule?.parse) return MeCabModule
+  if (MecabCtor?.parse) return MecabCtor
+  throw new Error('mecab-ya export is not compatible with this runtime.')
+})()
 const databaseUrl = process.env.DATABASE_URL
 const pool = new Pool({
   connectionString: databaseUrl,
