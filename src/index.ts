@@ -742,6 +742,18 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
     return
   }
 
+  // DB 조회/통계 생성이 3초를 넘길 수 있어 즉시 ACK 합니다.
+  if (!interaction.deferred && !interaction.replied) {
+    try {
+      await interaction.deferReply()
+    } catch (error) {
+      if (!isAlreadyAcknowledgedError(error)) {
+        throw error
+      }
+      return
+    }
+  }
+
   // 유저 옵션이 있으면 개인 통계, 없으면 서버 통계
   const targetUser = options.getUser('유저')
   const scope: Scope = targetUser ? 'user' : 'guild'
@@ -757,17 +769,6 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
       : 'month'
   const rankRaw = options.getInteger('순위') ?? 10
   const rank = Math.max(1, rankRaw)
-
-  // DB 조회/통계 생성이 3초를 넘길 수 있어 먼저 ACK 합니다.
-  if (!interaction.deferred && !interaction.replied) {
-    try {
-      await interaction.deferReply()
-    } catch (error) {
-      if (!isAlreadyAcknowledgedError(error)) {
-        throw error
-      }
-    }
-  }
 
   const customBase = makeCustomBase(interaction.user.id, scope, period, rank)
   const result = await fetchStatsPage({
@@ -875,7 +876,8 @@ function isAlreadyAcknowledgedError(error: unknown) {
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    (error as { code?: number }).code === 40060
+    ((error as { code?: number }).code === 40060 ||
+      (error as { code?: number }).code === 10062)
   )
 }
 
