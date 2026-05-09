@@ -88,6 +88,16 @@ async function safeReply(
   return interaction.reply(options)
 }
 
+async function safeCommandReply(
+  interaction: ChatInputCommandInteraction,
+  options: ReplyPayload
+) {
+  if (interaction.deferred || interaction.replied) {
+    return interaction.editReply(options)
+  }
+  return interaction.reply(options)
+}
+
 async function safeUpdate(
   interaction: ButtonInteraction,
   options: UpdatePayload
@@ -810,6 +820,11 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
   const rank = Math.max(1, rankRaw)
   const scope = scopeRaw
 
+  // DB 조회/통계 생성이 3초를 넘길 수 있어 먼저 ACK 합니다.
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferReply()
+  }
+
   const customBase = makeCustomBase(interaction.user.id, scope, period, rank)
   const result = await fetchStatsPage({
     scope,
@@ -861,7 +876,7 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
     )
   }
 
-  await safeReply(interaction, { embeds: [embed], components: [row] })
+  await safeCommandReply(interaction, { embeds: [embed], components: [row] })
 }
 
 async function handleAutoDrawSetupCommand(

@@ -10,8 +10,8 @@ declare module 'kuromoji-ko' {
 
   export type KuromojiBuilder = {
     build(
-      callback: (error: Error | null, tokenizer: KuromojiTokenizer) => void
-    ): void
+      callback?: (error: Error | null, tokenizer: KuromojiTokenizer) => void
+    ): Promise<KuromojiTokenizer> | void
   }
 
   export function builder(options?: { dicPath?: string }): KuromojiBuilder

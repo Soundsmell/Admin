@@ -140,13 +140,21 @@ async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
     const dicPath = resolveKuromojiDicPath()
     const builder = kuromoji.builder(dicPath ? { dicPath } : undefined)
 
+    const promiseResult = builder.build()
+    if (
+      promiseResult &&
+      typeof (promiseResult as Promise<KuromojiTokenizer>).then === 'function'
+    ) {
+      return (await promiseResult) ?? null
+    }
+
     return await new Promise((resolve, reject) => {
       builder.build((error, tokenizer) => {
         if (error) {
           reject(error)
           return
         }
-        resolve(tokenizer)
+        resolve(tokenizer ?? null)
       })
     })
   } catch (error) {
