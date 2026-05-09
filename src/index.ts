@@ -768,7 +768,13 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
 
   // DB 조회/통계 생성이 3초를 넘길 수 있어 먼저 ACK 합니다.
   if (!interaction.deferred && !interaction.replied) {
-    await interaction.deferReply()
+    try {
+      await interaction.deferReply()
+    } catch (error) {
+      if (!isAlreadyAcknowledgedError(error)) {
+        throw error
+      }
+    }
   }
 
   const customBase = makeCustomBase(interaction.user.id, scope, period, rank)
@@ -870,6 +876,15 @@ async function handleAutoDrawSetupCommand(
   })
 }
 
+function isAlreadyAcknowledgedError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: number }).code === 40060
+  )
+}
+
 async function handleUnexpectedInteractionError(
   interaction:
     | ButtonInteraction
@@ -879,6 +894,14 @@ async function handleUnexpectedInteractionError(
 ) {
   console.error('interactionCreate failed:', error)
   try {
+    if (
+      interaction.deferred ||
+      interaction.replied ||
+      isAlreadyAcknowledgedError(error)
+    ) {
+      return
+    }
+
     if (interaction.isModalSubmit()) {
       await interaction.reply({
         content: '처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
