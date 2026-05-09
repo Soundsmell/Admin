@@ -5,7 +5,7 @@ import {
   EmbedBuilder
 } from 'discord.js'
 import { Pool } from 'pg'
-const MeCabModule = require('mecab-ya')
+const MecabModule = require('mecab-async')
 
 export type Period = 'day' | 'week' | 'month' | 'all'
 export type Scope = 'user' | 'guild'
@@ -34,7 +34,7 @@ type ParticipantPageResult = {
 
 let mecabAvailable = false
 const mecab = (() => {
-  const MecabCtor = MeCabModule?.MeCab || MeCabModule?.default || MeCabModule
+  const MecabCtor = MecabModule?.MeCab || MecabModule?.default || MecabModule
   if (typeof MecabCtor === 'function') {
     try {
       const instance = new MecabCtor()
@@ -46,9 +46,9 @@ const mecab = (() => {
       // Fall back to module instance if it isn't a constructor
     }
   }
-  if (MeCabModule?.parse) {
+  if (MecabModule?.parse) {
     mecabAvailable = true
-    return MeCabModule
+    return MecabModule
   }
   if (MecabCtor?.parse) {
     mecabAvailable = true

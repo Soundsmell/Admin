@@ -1,4 +1,4 @@
-declare module 'mecab-ya' {
+declare module 'mecab-async' {
   type MecabRow = string[]
 
   interface MecabParser {
