@@ -4,9 +4,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     mecab libmecab-dev \
     git build-essential automake autoconf libtool pkg-config \
-  && git clone --depth 1 https://bitbucket.org/eunjeon/mecab-ko-dic.git /tmp/mecab-ko-dic \
+  && git clone --depth 1 https://github.com/eunjeon/mecab-ko-dic.git /tmp/mecab-ko-dic \
   && cd /tmp/mecab-ko-dic \
-  && ./autogen.sh \
   && ./configure \
   && make -j$(nproc) \
   && make install \
