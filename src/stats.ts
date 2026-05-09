@@ -101,22 +101,31 @@ async function analyzeWords(text: string): Promise<string[]> {
     return fallbackTokenize(text)
   }
 
-  return new Promise((resolve, reject) => {
-    mecab.parse(text, (err: Error | null, result: string[][]) => {
-      if (err) return reject(err)
+  try {
+    return await new Promise((resolve, reject) => {
+      try {
+        mecab.parse(text, (err: Error | null, result: string[][]) => {
+          if (err) return reject(err)
 
-      const words: string[] = []
-      for (const row of result) {
-        const surface = row[0]
-        const pos = row[1] ?? ''
-        if (surface === 'EOS') continue
-        if (!isValidWord(surface, pos)) continue
-        words.push(surface.toLowerCase())
+          const words: string[] = []
+          for (const row of result) {
+            const surface = row[0]
+            const pos = row[1] ?? ''
+            if (surface === 'EOS') continue
+            if (!isValidWord(surface, pos)) continue
+            words.push(surface.toLowerCase())
+          }
+
+          resolve(words)
+        })
+      } catch (error) {
+        reject(error)
       }
-
-      resolve(words)
     })
-  })
+  } catch (error) {
+    mecabAvailable = false
+    return fallbackTokenize(text)
+  }
 }
 
 export function makeCustomBase(

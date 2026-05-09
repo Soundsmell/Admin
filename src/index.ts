@@ -31,6 +31,26 @@ import {
 
 dotenv.config()
 
+async function safeReply(
+  interaction: { replied: boolean; deferred: boolean; reply: Function; followUp: Function },
+  options: Record<string, unknown>
+) {
+  if (interaction.replied || interaction.deferred) {
+    return interaction.followUp(options)
+  }
+  return interaction.reply(options)
+}
+
+async function safeUpdate(
+  interaction: { replied: boolean; deferred: boolean; update: Function; editReply: Function },
+  options: Record<string, unknown>
+) {
+  if (interaction.replied || interaction.deferred) {
+    return interaction.editReply(options)
+  }
+  return interaction.update(options)
+}
+
 // Koyeb 등 PaaS 배포를 위한 가상 웹 서버 설정 (Port Binding)
 const app = express()
 const PORT = process.env.PORT || 8000
@@ -174,7 +194,7 @@ client.on('interactionCreate', async interaction => {
     const participantsParsed = parseParticipantsCustomId(interaction.customId)
     if (participantsParsed) {
       if (!interaction.guildId) {
-        await interaction.reply({
+        await safeReply(interaction, {
           content: '서버에서만 사용할 수 있어요.',
           ephemeral: true
         })
@@ -182,7 +202,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (!interaction.guild) {
-        await interaction.reply({
+        await safeReply(interaction, {
           content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
           ephemeral: true
         })
@@ -190,7 +210,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (interaction.user.id !== participantsParsed.ownerId) {
-        await interaction.reply({
+        await safeReply(interaction, {
           content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
           ephemeral: true
         })
@@ -243,7 +263,7 @@ client.on('interactionCreate', async interaction => {
         statsBase
       )
 
-      await interaction.update({ embeds: [embed], components: [row] })
+      await safeUpdate(interaction, { embeds: [embed], components: [row] })
       return
     }
   }
@@ -253,7 +273,7 @@ client.on('interactionCreate', async interaction => {
     if (!parsed) return
 
     if (!interaction.guildId) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: '서버에서만 사용할 수 있어요.',
         ephemeral: true
       })
@@ -261,7 +281,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.user.id !== parsed.ownerId) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
         ephemeral: true
       })
@@ -285,7 +305,7 @@ client.on('interactionCreate', async interaction => {
     })
 
     if (!interaction.guild) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
         ephemeral: true
       })
@@ -345,7 +365,7 @@ client.on('interactionCreate', async interaction => {
       )
     }
 
-    await interaction.update({ embeds: [embed], components: [row] })
+    await safeUpdate(interaction, { embeds: [embed], components: [row] })
     return
   }
 
@@ -362,7 +382,7 @@ client.on('interactionCreate', async interaction => {
     ].filter(Boolean)
     const restrictedIds = restrictedUsers.map(user => user!.id)
 
-    await interaction.reply({
+    await safeReply(interaction, {
       content: '추첨을 시작합니다...',
       ephemeral: true
     })
@@ -371,7 +391,7 @@ client.on('interactionCreate', async interaction => {
 
   if (interaction.commandName === '통계') {
     if (!interaction.guildId) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: '서버에서만 사용할 수 있어요.',
         ephemeral: true
       })
@@ -379,7 +399,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (!process.env.DATABASE_URL) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: 'DATABASE_URL 설정이 필요해요.',
         ephemeral: true
       })
@@ -448,7 +468,7 @@ client.on('interactionCreate', async interaction => {
       )
     }
 
-    await interaction.reply({ embeds: [embed], components: [row] })
+    await safeReply(interaction, { embeds: [embed], components: [row] })
   }
 })
 
