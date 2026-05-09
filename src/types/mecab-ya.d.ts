@@ -1,13 +1,16 @@
 declare module 'mecab-ya' {
   type MecabRow = string[]
 
-  class MeCab {
+  interface MecabParser {
     parse(
       text: string,
       callback: (err: Error | null, result: MecabRow[]) => void
     ): void
   }
 
-  const MeCabExport: typeof MeCab
-  export = MeCabExport
+  const MecabExport:
+    | MecabParser
+    | { new (): MecabParser }
+    | { default: MecabParser }
+  export = MecabExport
 }
