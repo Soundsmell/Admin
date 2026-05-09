@@ -4,7 +4,9 @@ import {
   ButtonStyle,
   EmbedBuilder
 } from 'discord.js'
+import path from 'path'
 import { Pool } from 'pg'
+import { pathToFileURL } from 'url'
 import type {
   KuromojiBuilder,
   KuromojiTokenizer
@@ -86,6 +88,27 @@ function fallbackTokenize(text: string) {
     .map(token => token.toLowerCase())
 }
 
+function resolveKuromojiDicPath() {
+  const fromEnv = process.env.KUROMOJI_DICT_PATH?.trim()
+  if (fromEnv) {
+    if (/^https?:\/\//i.test(fromEnv) || fromEnv.startsWith('file://')) {
+      return fromEnv
+    }
+    const absolutePath = path.isAbsolute(fromEnv)
+      ? fromEnv
+      : path.resolve(fromEnv)
+    return pathToFileURL(absolutePath).toString()
+  }
+
+  try {
+    const packageJsonPath = require.resolve('kuromoji-ko/package.json')
+    const dictDir = path.join(path.dirname(packageJsonPath), 'dict')
+    return pathToFileURL(dictDir).toString()
+  } catch (error) {
+    return undefined
+  }
+}
+
 async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
   try {
     const kuromoji = require('kuromoji-ko') as {
@@ -93,7 +116,7 @@ async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
     }
     if (!kuromoji?.builder) return null
 
-    const dicPath = process.env.KUROMOJI_DICT_PATH
+    const dicPath = resolveKuromojiDicPath()
     const builder = kuromoji.builder(dicPath ? { dicPath } : undefined)
 
     return await new Promise((resolve, reject) => {
@@ -122,15 +145,22 @@ async function getTokenizer() {
   }
 
   if (!tokenizerPromise) {
-    tokenizerPromise = createKuromojiTokenizer().then(tokenizer => {
-      if (!tokenizer) {
+    tokenizerPromise = createKuromojiTokenizer()
+      .then(tokenizer => {
+        if (!tokenizer) {
+          lastTokenizerInitFailedAt = Date.now()
+          tokenizerPromise = null
+        } else {
+          lastTokenizerInitFailedAt = 0
+        }
+        return tokenizer
+      })
+      .catch(error => {
+        console.warn('kuromoji-ko tokenizer init failed, fallback tokenization used.')
         lastTokenizerInitFailedAt = Date.now()
         tokenizerPromise = null
-      } else {
-        lastTokenizerInitFailedAt = 0
-      }
-      return tokenizer
-    })
+        return null
+      })
   }
   return tokenizerPromise
 }
@@ -150,7 +180,7 @@ function normalizeNonNegativeInt(value: number, fallback = 0) {
 }
 
 async function analyzeWords(text: string): Promise<string[]> {
-  const tokenizer = await getTokenizer()
+  const tokenizer = await getTokenizer().catch(() => null)
   if (!tokenizer) return fallbackTokenize(text)
 
   try {
