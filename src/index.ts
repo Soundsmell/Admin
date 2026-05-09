@@ -39,7 +39,8 @@ import {
   parseStatsCustomId,
   trackMessage,
   PAGE_SIZE,
-  PARTICIPANT_PAGE_SIZE
+  PARTICIPANT_PAGE_SIZE,
+  type Scope
 } from './stats'
 import { DRAW_CONFIG, AUTO_DRAW_CONFIG, LABELS, getEnvironment } from './config'
 import {
@@ -154,15 +155,11 @@ const commands = [
   new SlashCommandBuilder()
     .setName('통계')
     .setDescription('메시지/단어 통계를 확인합니다')
-    .addStringOption(option =>
+    .addUserOption(option =>
       option
-        .setName('대상')
-        .setDescription('개인 또는 서버')
-        .setRequired(true)
-        .addChoices(
-          { name: '개인', value: 'user' },
-          { name: '서버', value: 'guild' }
-        )
+        .setName('유저')
+        .setDescription('특정 유저의 통계를 보려면 선택 (없으면 서버 통계)')
+        .setRequired(false)
     )
     .addStringOption(option =>
       option
@@ -745,14 +742,10 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
     return
   }
 
-  const scopeRaw = options.getString('대상', true)
-  if (scopeRaw !== 'user' && scopeRaw !== 'guild') {
-    await safeReply(interaction, {
-      content: '잘못된 대상 값이에요. 다시 시도해주세요.',
-      ephemeral: true
-    })
-    return
-  }
+  // 유저 옵션이 있으면 개인 통계, 없으면 서버 통계
+  const targetUser = options.getUser('유저')
+  const scope: Scope = targetUser ? 'user' : 'guild'
+  const targetUserId = targetUser?.id ?? interaction.user.id
 
   const periodRaw = options.getString('기간')
   const period =
@@ -764,7 +757,6 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
       : 'month'
   const rankRaw = options.getInteger('순위') ?? 10
   const rank = Math.max(1, rankRaw)
-  const scope = scopeRaw
 
   // DB 조회/통계 생성이 3초를 넘길 수 있어 먼저 ACK 합니다.
   if (!interaction.deferred && !interaction.replied) {
@@ -784,17 +776,19 @@ async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
     rank,
     page: 0,
     pageSize: PAGE_SIZE,
-    userId: interaction.user.id,
+    userId: targetUserId,
     guildId: interaction.guildId
   })
 
   const member =
     scope === 'user'
-      ? await interaction.guild?.members.fetch(interaction.user.id)
+      ? await interaction.guild?.members.fetch(targetUserId)
       : null
   const guild = interaction.guild
   const targetLabel =
-    scope === 'user' ? `<@${interaction.user.id}>` : (guild?.name ?? '서버')
+    scope === 'user'
+      ? `${member?.displayName ?? '알 수 없음'} (${targetUserId})`
+      : (guild?.name ?? '서버')
   const embed = buildStatsEmbed({
     scope,
     period,
