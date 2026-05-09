@@ -519,7 +519,7 @@ export async function fetchParticipantsPage(args: {
     LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
   `
   const idsRes = await pool.query(idsQuery, [...params, limit, offset])
-  const userIds = idsRes.rows.map(row => row.user_id as string)
+  const userIds = idsRes.rows.map((row: { user_id: string }) => row.user_id)
   const hasNext = offset + limit < totalCount
 
   return {

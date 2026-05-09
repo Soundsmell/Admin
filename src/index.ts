@@ -181,6 +181,14 @@ client.on('interactionCreate', async interaction => {
         return
       }
 
+      if (!interaction.guild) {
+        await interaction.reply({
+          content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
+          ephemeral: true
+        })
+        return
+      }
+
       if (interaction.user.id !== participantsParsed.ownerId) {
         await interaction.reply({
           content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
@@ -205,7 +213,7 @@ client.on('interactionCreate', async interaction => {
 
       const userId = result.userIds[0]
       const member = userId
-        ? await interaction.guild?.members.fetch(userId).catch(() => null)
+        ? await interaction.guild.members.fetch(userId).catch(() => null)
         : null
       const embed = buildParticipantsEmbed({
         period: participantsParsed.period,
@@ -276,6 +284,14 @@ client.on('interactionCreate', async interaction => {
       guildId: interaction.guildId
     })
 
+    if (!interaction.guild) {
+      await interaction.reply({
+        content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
+        ephemeral: true
+      })
+      return
+    }
+
     const member =
       parsed.scope === 'user'
         ? await interaction.guild.members.fetch(interaction.user.id)
@@ -301,12 +317,12 @@ client.on('interactionCreate', async interaction => {
       pageSize: PAGE_SIZE,
       totalCount: result.totalCount,
       participantCount: result.participantCount,
-      memberName: member?.displayName ?? null,
-      joinedAt: member?.joinedAt ?? null,
-      avatarUrl: member?.displayAvatarURL() ?? null,
-      guildName: guild?.name ?? null,
-      guildCreatedAt: guild?.createdAt ?? null,
-      guildIconUrl: guild?.iconURL() ?? null
+      memberName: member?.displayName ?? undefined,
+      joinedAt: member?.joinedAt ?? undefined,
+      avatarUrl: member?.displayAvatarURL() ?? undefined,
+      guildName: guild?.name ?? undefined,
+      guildCreatedAt: guild?.createdAt ?? undefined,
+      guildIconUrl: guild?.iconURL() ?? undefined
     })
     const row = buildStatsButtons(
       customBase,
@@ -409,12 +425,12 @@ client.on('interactionCreate', async interaction => {
       pageSize: PAGE_SIZE,
       totalCount: result.totalCount,
       participantCount: result.participantCount,
-      memberName: member?.displayName ?? null,
-      joinedAt: member?.joinedAt ?? null,
-      avatarUrl: member?.displayAvatarURL() ?? null,
-      guildName: guild?.name ?? null,
-      guildCreatedAt: guild?.createdAt ?? null,
-      guildIconUrl: guild?.iconURL() ?? null
+      memberName: member?.displayName ?? undefined,
+      joinedAt: member?.joinedAt ?? undefined,
+      avatarUrl: member?.displayAvatarURL() ?? undefined,
+      guildName: guild?.name ?? undefined,
+      guildCreatedAt: guild?.createdAt ?? undefined,
+      guildIconUrl: guild?.iconURL() ?? undefined
     })
     const row = buildStatsButtons(customBase, 0, false, result.hasNext)
 
