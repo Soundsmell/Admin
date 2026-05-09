@@ -41,19 +41,27 @@ import {
   PAGE_SIZE,
   PARTICIPANT_PAGE_SIZE
 } from './stats'
+import { DRAW_CONFIG, AUTO_DRAW_CONFIG, LABELS, getEnvironment } from './config'
+import {
+  safeReply,
+  safeCommandReply,
+  safeUpdate,
+  getCommandOptions,
+  ensureGuildContext,
+  hasAdministratorPermission,
+  formatTime,
+  normalizePositiveInt,
+  normalizeNonNegativeInt,
+  getNextPage,
+  buildCronExpression
+} from './utils'
+
+import { parseDailyTime } from './utils'
 
 dotenv.config()
 
 type ReplyPayload = InteractionReplyOptions
 type UpdatePayload = InteractionEditReplyOptions
-const DEFAULT_DRAW_COUNT = 2
-const DRAW_COUNT_MIN = 1
-const DRAW_COUNT_MAX = 10
-const BONUS_DRAW_CHANCE = 0.02
-const BONUS_DRAW_EXTRA_COUNT = 3
-const DRAW_BLACKLIST_USER_IDS = new Set(['1238637139856592917'])
-const DEFAULT_AUTO_DRAW_TIME = '20:00'
-const AUTO_DRAW_TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/
 
 type AutoDrawConfig = {
   guildId: string
@@ -77,37 +85,6 @@ const settingsPool = new Pool({
     : undefined
 })
 const autoDrawTasks = new Map<string, cron.ScheduledTask>()
-
-async function safeReply(
-  interaction: ButtonInteraction | ChatInputCommandInteraction,
-  options: ReplyPayload
-) {
-  if (interaction.replied || interaction.deferred) {
-    return interaction.followUp(options)
-  }
-  return interaction.reply(options)
-}
-
-async function safeCommandReply(
-  interaction: ChatInputCommandInteraction,
-  options: ReplyPayload
-) {
-  if (interaction.deferred || interaction.replied) {
-    const { ephemeral, ...rest } = options as any
-    return interaction.editReply(rest)
-  }
-  return interaction.reply(options)
-}
-
-async function safeUpdate(
-  interaction: ButtonInteraction,
-  options: UpdatePayload
-) {
-  if (interaction.replied || interaction.deferred) {
-    return interaction.editReply(options)
-  }
-  return interaction.update(options)
-}
 
 // Koyeb 등 PaaS 배포를 위한 가상 웹 서버 설정 (Port Binding)
 const app = express()
@@ -217,23 +194,6 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ]
 
-function parseDailyTime(timeInput: string) {
-  const normalized = timeInput.trim()
-  const matched = AUTO_DRAW_TIME_REGEX.exec(normalized)
-  if (!matched) return null
-  const hour = Number(matched[1])
-  const minute = Number(matched[2])
-  return { hour, minute, normalized }
-}
-
-function buildCronExpression(hour: number, minute: number) {
-  return `${minute} ${hour} * * *`
-}
-
-function formatTime(hour: number, minute: number) {
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
-}
-
 function buildAutoDrawSetupSuccessEmbed(args: {
   channelId: string
   hour: number
@@ -307,7 +267,7 @@ function buildAutoDrawPanelEmbed(state: AutoDrawPanelState) {
       },
       {
         name: '보너스 이벤트',
-        value: `${Math.round(BONUS_DRAW_CHANCE * 100)}% 확률로 +${BONUS_DRAW_EXTRA_COUNT}명`,
+        value: `${Math.round(DRAW_CONFIG.BONUS_CHANCE * 100)}% 확률로 +${DRAW_CONFIG.BONUS_EXTRA_COUNT}명`,
         inline: false
       }
     ],
@@ -504,7 +464,7 @@ function scheduleAutoDraw(config: AutoDrawConfig) {
   const task = cron.schedule(
     cronExpression,
     async () => {
-      await runDailyTask(config.channelId, DEFAULT_DRAW_COUNT, [], true)
+      await runDailyTask(config.channelId, DRAW_CONFIG.DEFAULT_COUNT, [], true)
     },
     {
       scheduled: true,
@@ -539,7 +499,7 @@ client.once('ready', async () => {
     await ensureAutoDrawTable()
     const configs = await getAllAutoDrawConfigs()
     if (configs.length === 0 && process.env.TARGET_CHANNEL_ID) {
-      const defaultParsed = parseDailyTime(DEFAULT_AUTO_DRAW_TIME)!
+      const defaultParsed = parseDailyTime(AUTO_DRAW_CONFIG.DEFAULT_TIME)!
       scheduleAutoDraw({
         guildId: `legacy:${process.env.TARGET_CHANNEL_ID}`,
         channelId: process.env.TARGET_CHANNEL_ID,
@@ -555,21 +515,6 @@ client.once('ready', async () => {
     console.error('Failed to initialize auto draw schedules:', error)
   }
 })
-
-function getNextPage(action: 'prev' | 'next' | 'open', currentPage: number) {
-  if (action === 'next') return currentPage + 1
-  if (action === 'prev') return Math.max(currentPage - 1, 0)
-  return currentPage
-}
-
-function ensureGuildContext(interaction: {
-  guildId: string | null
-  guild: Guild | null
-}) {
-  if (!interaction.guildId) return 'no-guild-id' as const
-  if (!interaction.guild) return 'no-guild' as const
-  return 'ok' as const
-}
 
 async function replyGuildOnly(
   interaction: ButtonInteraction | ChatInputCommandInteraction
@@ -592,18 +537,6 @@ async function replyOwnerOnly(interaction: ButtonInteraction) {
     content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
     ephemeral: true
   })
-}
-
-function hasAdministratorPermission(
-  interaction:
-    | ButtonInteraction
-    | ChatInputCommandInteraction
-    | ModalSubmitInteraction
-) {
-  return (
-    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ??
-    false
-  )
 }
 
 async function replyAdminOnly(
@@ -774,18 +707,12 @@ async function handleStatsButton(interaction: ButtonInteraction) {
   return true
 }
 
-function getCommandOptions(
-  interaction: ChatInputCommandInteraction
-): CommandInteractionOptionResolver {
-  return interaction.options as CommandInteractionOptionResolver
-}
-
 async function handleDrawCommand(interaction: ChatInputCommandInteraction) {
   const options = getCommandOptions(interaction)
-  const drawCountRaw = options.getInteger('인원') ?? DEFAULT_DRAW_COUNT
+  const drawCountRaw = options.getInteger('인원') ?? DRAW_CONFIG.DEFAULT_COUNT
   const drawCount = Math.min(
-    DRAW_COUNT_MAX,
-    Math.max(DRAW_COUNT_MIN, drawCountRaw)
+    DRAW_CONFIG.MAX_COUNT,
+    Math.max(DRAW_CONFIG.MIN_COUNT, drawCountRaw)
   )
   const restrictedUsers = [
     options.getUser('제한1'),
@@ -919,7 +846,7 @@ async function handleAutoDrawSetupCommand(
     return
   }
 
-  const defaultParsed = parseDailyTime(DEFAULT_AUTO_DRAW_TIME)
+  const defaultParsed = parseDailyTime(AUTO_DRAW_CONFIG.DEFAULT_TIME)
   if (!defaultParsed) {
     await safeReply(interaction, {
       content: '기본 시간 설정을 읽지 못했어요.',
@@ -1075,8 +1002,8 @@ async function handleAutoDrawPanelButton(interaction: ButtonInteraction) {
           channelId: parsed.state.channelId,
           hour: parsed.state.hour,
           minute: parsed.state.minute,
-          bonusChance: BONUS_DRAW_CHANCE,
-          bonusExtraCount: BONUS_DRAW_EXTRA_COUNT,
+          bonusChance: DRAW_CONFIG.BONUS_CHANCE,
+          bonusExtraCount: DRAW_CONFIG.BONUS_EXTRA_COUNT,
           enabled: parsed.state.enabled
         })
       ],
@@ -1193,7 +1120,7 @@ client.on('messageCreate', async message => {
 
 async function runDailyTask(
   targetChannelId?: string,
-  drawCount = 2,
+  drawCount: number = DRAW_CONFIG.DEFAULT_COUNT,
   restrictedUserIds: string[] = [],
   isScheduledRun = false
 ) {
@@ -1230,16 +1157,16 @@ async function runDailyTask(
       member =>
         !member.user.bot &&
         member.id !== guild.ownerId &&
-        !DRAW_BLACKLIST_USER_IDS.has(member.id)
+        !DRAW_CONFIG.BLACKLIST_USER_IDS.has(member.id)
     )
 
     if (restrictedSet.size > 0) {
       candidates = candidates.filter(member => restrictedSet.has(member.id))
     }
 
-    const bonusTriggered = isScheduledRun && Math.random() < BONUS_DRAW_CHANCE
+    const bonusTriggered = isScheduledRun && Math.random() < DRAW_CONFIG.BONUS_CHANCE
     const totalDrawCount = bonusTriggered
-      ? drawCount + BONUS_DRAW_EXTRA_COUNT
+      ? drawCount + DRAW_CONFIG.BONUS_EXTRA_COUNT
       : drawCount
 
     if (candidates.size < totalDrawCount) {
