@@ -89,24 +89,45 @@ function fallbackTokenize(text: string) {
 }
 
 function resolveKuromojiDicPath() {
+  const toFileUrl = (targetPath: string) => {
+    const normalizedPath = path.isAbsolute(targetPath)
+      ? targetPath
+      : path.resolve(targetPath)
+    const url = pathToFileURL(normalizedPath).toString()
+    return url.endsWith('/') ? url : `${url}/`
+  }
+
   const fromEnv = process.env.KUROMOJI_DICT_PATH?.trim()
   if (fromEnv) {
     if (/^https?:\/\//i.test(fromEnv) || fromEnv.startsWith('file://')) {
-      return fromEnv
+      return fromEnv.endsWith('/') ? fromEnv : `${fromEnv}/`
     }
-    const absolutePath = path.isAbsolute(fromEnv)
-      ? fromEnv
-      : path.resolve(fromEnv)
-    return pathToFileURL(absolutePath).toString()
+    return toFileUrl(fromEnv)
+  }
+
+  const candidatePaths: string[] = []
+  try {
+    const mainPath = require.resolve('kuromoji-ko')
+    candidatePaths.push(path.join(path.dirname(mainPath), '..', 'dict'))
+    candidatePaths.push(path.join(path.dirname(mainPath), 'dict'))
+  } catch (error) {
+    // try next fallback
   }
 
   try {
     const packageJsonPath = require.resolve('kuromoji-ko/package.json')
-    const dictDir = path.join(path.dirname(packageJsonPath), 'dict')
-    return pathToFileURL(dictDir).toString()
+    candidatePaths.push(path.join(path.dirname(packageJsonPath), 'dict'))
   } catch (error) {
-    return undefined
+    // ignored
   }
+
+  for (const candidatePath of candidatePaths) {
+    if (candidatePath && require('fs').existsSync(candidatePath)) {
+      return toFileUrl(candidatePath)
+    }
+  }
+
+  return undefined
 }
 
 async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
