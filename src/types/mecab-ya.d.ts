@@ -8,5 +8,6 @@ declare module 'mecab-ya' {
     ): void
   }
 
-  export = MeCab
+  const MeCabExport: typeof MeCab
+  export = MeCabExport
 }
