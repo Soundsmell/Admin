@@ -5,7 +5,10 @@ import {
   EmbedBuilder
 } from 'discord.js'
 import { Pool } from 'pg'
-const MecabModule = require('mecab-async')
+import type {
+  KuromojiBuilder,
+  KuromojiTokenizer
+} from 'kuromoji-ko'
 
 export type Period = 'day' | 'week' | 'month' | 'all'
 export type Scope = 'user' | 'guild'
@@ -32,30 +35,9 @@ type ParticipantPageResult = {
   hasNext: boolean
 }
 
-let mecabAvailable = false
-const mecab = (() => {
-  const MecabCtor = MecabModule?.MeCab || MecabModule?.default || MecabModule
-  if (typeof MecabCtor === 'function') {
-    try {
-      const instance = new MecabCtor()
-      if (instance?.parse) {
-        mecabAvailable = true
-        return instance
-      }
-    } catch (error) {
-      // Fall back to module instance if it isn't a constructor
-    }
-  }
-  if (MecabModule?.parse) {
-    mecabAvailable = true
-    return MecabModule
-  }
-  if (MecabCtor?.parse) {
-    mecabAvailable = true
-    return MecabCtor
-  }
-  return null
-})()
+let tokenizerPromise: Promise<KuromojiTokenizer | null> | null = null
+let lastTokenizerInitFailedAt = 0
+const TOKENIZER_RETRY_MS = 60_000
 const databaseUrl = process.env.DATABASE_URL
 const pool = new Pool({
   connectionString: databaseUrl,
@@ -89,41 +71,104 @@ function isValidWord(word: string, pos: string) {
   return true
 }
 
+function getPeriodLabel(period: Period) {
+  if (period === 'day') return '일'
+  if (period === 'week') return '주'
+  if (period === 'month') return '월'
+  return '전체'
+}
+
 function fallbackTokenize(text: string) {
   return text
-    .split(/\s+/)
+    .split(/[\s.,!?;:"'()[\]{}<>/\\|`~@#$%^&*+=_-]+/)
     .map(token => token.trim())
-    .filter(token => token.length > 0)
+    .filter(token => token.length > 1)
+    .map(token => token.toLowerCase())
+}
+
+async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
+  try {
+    const kuromoji = require('kuromoji-ko') as {
+      builder(options?: { dicPath?: string }): KuromojiBuilder
+    }
+    if (!kuromoji?.builder) return null
+
+    const dicPath = process.env.KUROMOJI_DICT_PATH
+    const builder = kuromoji.builder(dicPath ? { dicPath } : undefined)
+
+    return await new Promise((resolve, reject) => {
+      builder.build((error, tokenizer) => {
+        if (error) {
+          reject(error)
+          return
+        }
+        resolve(tokenizer)
+      })
+    })
+  } catch (error) {
+    console.warn('kuromoji-ko tokenizer init failed, fallback tokenization used.')
+    return null
+  }
+}
+
+async function getTokenizer() {
+  const now = Date.now()
+  if (
+    tokenizerPromise === null &&
+    lastTokenizerInitFailedAt > 0 &&
+    now - lastTokenizerInitFailedAt < TOKENIZER_RETRY_MS
+  ) {
+    return null
+  }
+
+  if (!tokenizerPromise) {
+    tokenizerPromise = createKuromojiTokenizer().then(tokenizer => {
+      if (!tokenizer) {
+        lastTokenizerInitFailedAt = Date.now()
+        tokenizerPromise = null
+      } else {
+        lastTokenizerInitFailedAt = 0
+      }
+      return tokenizer
+    })
+  }
+  return tokenizerPromise
+}
+
+function normalizePositiveInt(value: number, fallback: number) {
+  if (!Number.isFinite(value)) return fallback
+  const floored = Math.floor(value)
+  if (floored <= 0) return fallback
+  return floored
+}
+
+function normalizeNonNegativeInt(value: number, fallback = 0) {
+  if (!Number.isFinite(value)) return fallback
+  const floored = Math.floor(value)
+  if (floored < 0) return fallback
+  return floored
 }
 
 async function analyzeWords(text: string): Promise<string[]> {
-  if (!mecabAvailable || !mecab) {
-    return fallbackTokenize(text)
-  }
+  const tokenizer = await getTokenizer()
+  if (!tokenizer) return fallbackTokenize(text)
 
   try {
-    return await new Promise((resolve, reject) => {
-      try {
-        mecab.parse(text, (err: Error | null, result: string[][]) => {
-          if (err) return reject(err)
+    const tokens = tokenizer.tokenize(text)
+    const words: string[] = []
 
-          const words: string[] = []
-          for (const row of result) {
-            const surface = row[0]
-            const pos = row[1] ?? ''
-            if (surface === 'EOS') continue
-            if (!isValidWord(surface, pos)) continue
-            words.push(surface.toLowerCase())
-          }
+    for (const token of tokens) {
+      const surface = token.surface_form?.trim()
+      if (!surface) continue
 
-          resolve(words)
-        })
-      } catch (error) {
-        reject(error)
-      }
-    })
+      const pos = token.pos ?? ''
+      if (!isValidWord(surface, pos)) continue
+      words.push(surface.toLowerCase())
+    }
+
+    return words
   } catch (error) {
-    mecabAvailable = false
+    console.warn('kuromoji-ko tokenize failed, fallback tokenization used.')
     return fallbackTokenize(text)
   }
 }
@@ -156,6 +201,8 @@ export function parseStatsCustomId(customId: string) {
   const rank = Number(rankStr)
   const page = Number(pageStr)
   if (!Number.isFinite(rank) || !Number.isFinite(page)) return null
+  if (!Number.isInteger(rank) || !Number.isInteger(page)) return null
+  if (rank <= 0 || page < 0) return null
 
   return {
     ownerId,
@@ -194,6 +241,8 @@ export function parseParticipantsCustomId(customId: string) {
   const rank = Number(rankStr)
   const page = Number(pageStr)
   if (!Number.isFinite(rank) || !Number.isFinite(page)) return null
+  if (!Number.isInteger(rank) || !Number.isInteger(page)) return null
+  if (rank <= 0 || page < 0) return null
 
   return {
     ownerId,
@@ -239,14 +288,7 @@ export function buildStatsEmbed(args: {
     guildIconUrl
   } = args
 
-  const periodLabel =
-    period === 'day'
-      ? '일'
-      : period === 'week'
-        ? '주'
-        : period === 'month'
-          ? '월'
-          : '전체'
+  const periodLabel = getPeriodLabel(period)
 
   const maxFieldLength = 1000
   const startRank = page * pageSize
@@ -332,14 +374,7 @@ export function buildParticipantsEmbed(args: {
   avatarUrl?: string | null
 }) {
   const { period, guildName, totalCount, page, memberName, avatarUrl } = args
-  const periodLabel =
-    period === 'day'
-      ? '일'
-      : period === 'week'
-        ? '주'
-        : period === 'month'
-          ? '월'
-          : '전체'
+  const periodLabel = getPeriodLabel(period)
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PARTICIPANT_PAGE_SIZE))
   const embed = new EmbedBuilder()
@@ -448,6 +483,9 @@ export async function fetchStatsPage(args: {
   guildId: string
 }): Promise<StatsPageResult> {
   assertDatabaseUrl()
+  const rank = normalizePositiveInt(args.rank, 10)
+  const pageSize = normalizePositiveInt(args.pageSize, PAGE_SIZE)
+  const page = normalizeNonNegativeInt(args.page, 0)
 
   const start = getPeriodStart(args.period)
   const baseWhere =
@@ -483,9 +521,9 @@ export async function fetchStatsPage(args: {
   `
   const wordCountRes = await pool.query(wordCountQuery, params)
   const totalWordCount = wordCountRes.rows[0]?.count ?? 0
-  const totalCount = Math.min(args.rank, totalWordCount)
+  const totalCount = Math.min(rank, totalWordCount)
 
-  const offset = args.page * args.pageSize
+  const offset = page * pageSize
   if (offset >= totalCount) {
     return {
       totalMessages,
@@ -496,7 +534,7 @@ export async function fetchStatsPage(args: {
     }
   }
 
-  const limit = Math.min(args.pageSize, totalCount - offset)
+  const limit = Math.min(pageSize, totalCount - offset)
   const limitParamIndex = params.length + 1
   const offsetParamIndex = params.length + 2
   const wordQuery = `
@@ -528,6 +566,8 @@ export async function fetchParticipantsPage(args: {
   guildId: string
 }): Promise<ParticipantPageResult> {
   assertDatabaseUrl()
+  const pageSize = normalizePositiveInt(args.pageSize, PARTICIPANT_PAGE_SIZE)
+  const page = normalizeNonNegativeInt(args.page, 0)
 
   const start = getPeriodStart(args.period)
   const timeClause = start ? ' AND created_at >= $2' : ''
@@ -541,7 +581,7 @@ export async function fetchParticipantsPage(args: {
   const countRes = await pool.query(countQuery, params)
   const totalCount = countRes.rows[0]?.count ?? 0
 
-  const offset = args.page * args.pageSize
+  const offset = page * pageSize
   if (offset >= totalCount) {
     return {
       userIds: [],
@@ -550,7 +590,7 @@ export async function fetchParticipantsPage(args: {
     }
   }
 
-  const limit = Math.min(args.pageSize, totalCount - offset)
+  const limit = Math.min(pageSize, totalCount - offset)
   const limitParamIndex = params.length + 1
   const offsetParamIndex = params.length + 2
   const idsQuery = `

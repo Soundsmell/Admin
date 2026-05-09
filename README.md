@@ -1,40 +1,94 @@
 # Daily Admin Bot
 
-매일 오전 0시(UTC+9)에 서버의 랜덤한 2명의 유저(봇 제외)를 뽑아 메시지를 출력하는 디스코드 봇입니다.
+디스코드 서버에서 매일 자동 추첨과 메시지/단어 통계를 제공하는 봇입니다.
 
-## 사전 준비
+## Features
 
-1. **Node.js 설치**: [Node.js 공식 홈페이지](https://nodejs.org/)에서 설치해주세요.
-2. **디스코드 봇 생성**:
-   - [Discord Developer Portal](https://discord.com/developers/applications)에 접속하여 애플리케이션을 생성합니다.
-   - 'Bot' 탭에서 봇을 추가합니다.
-   - **Privileged Gateway Intents** 항목의 **Server Members Intent**, **Message Content Intent**를 모두 켜주세요.
-   - 봇 토큰(Token)을 복사해둡니다.
-3. **서버 초대**:
-   - 'OAuth2' -> 'URL Generator' 탭으로 이동합니다.
-   - 'bot' 및 'applications.commands' 스코프를 체크합니다.
-   - 'Send Messages' 등 필요한 권한을 체크합니다.
-   - 생성된 URL로 본인의 서버에 봇을 초대합니다.
+- 매일 `20:00 (Asia/Seoul)` 자동 추첨
+- 수동 추첨 명령어 `/추첨` 지원
+- `2%` 확률 보너스 이벤트: 자동 추첨 시 `+3명` 추가 당첨
+- `/통계` 명령어로 개인/서버 기준 메시지, 단어 통계 조회
+- `kuromoji-ko` 기반 한국어 토큰 분석 (실패 시 안전 fallback)
+- Koyeb 등 PaaS 배포를 위한 웹 헬스 엔드포인트(`GET /`)
 
-## 설치 및 설정
+## Commands
 
-1. 패키지 설치:
-   ```bash
-   npm install
-   ```
-2. 환경 변수 설정:
-   - `.env` 파일을 열고 내용을 수정합니다.
-   - `DISCORD_TOKEN`: 위에서 복사한 봇 토큰을 붙여넣습니다.
-   - `TARGET_CHANNEL_ID`: 알림을 보낼 채널의 ID를 입력합니다.
-   - `DATABASE_URL`: Neon(Postgres) 연결 문자열을 입력합니다.
+- `/추첨`
+  - 즉시 추첨 실행
+  - 옵션: `인원(1~10)`, `제한1~제한5`(특정 유저만 후보로 제한)
+- `/통계`
+  - 대상: `개인`, `서버`
+  - 기간: `일`, `주`, `월`, `전체`
+  - 순위: `10`, `30`, `50`, `100`
+- `/추첨설정`
+  - 임베드 패널에서 자동추첨 `ON/OFF`, 채널, 시간(`HH:MM`) 설정 후 저장
 
-## 실행 방법
+## Requirements
+
+- Node.js 20+
+- PostgreSQL (예: Neon)
+- Discord Bot Token
+
+## Discord Bot Setup
+
+1. [Discord Developer Portal](https://discord.com/developers/applications)에서 앱 생성
+2. `Bot` 탭에서 봇 추가 후 토큰 발급
+3. **Privileged Gateway Intents** 활성화
+   - `Server Members Intent`
+   - `Message Content Intent`
+4. `OAuth2 -> URL Generator`에서
+   - Scope: `bot`, `applications.commands`
+   - 필요한 권한(예: `Send Messages`) 선택 후 서버 초대
+
+## Environment Variables
+
+`.env` 파일 예시:
+
+```env
+DISCORD_TOKEN=your_discord_bot_token
+TARGET_CHANNEL_ID=your_channel_id
+DATABASE_URL=postgres_connection_string
+PORT=8000
+# Optional
+# KUROMOJI_DICT_PATH=./dict
+```
+
+- `DISCORD_TOKEN`: 디스코드 봇 토큰
+- `TARGET_CHANNEL_ID`: 자동 추첨 메시지 전송 채널 ID
+- `DATABASE_URL`: PostgreSQL 연결 문자열
+- `PORT`: 헬스 서버 포트 (기본값 `8000`)
+- `KUROMOJI_DICT_PATH`(선택): kuromoji 사전 경로 커스텀
+- `TARGET_CHANNEL_ID`(선택): DB 설정이 없을 때만 레거시 기본 자동 추첨 채널로 사용
+
+## Install
 
 ```bash
+npm install
+```
+
+## Run
+
+개발 모드:
+
+```bash
+npm run dev
+```
+
+빌드 후 실행:
+
+```bash
+npm run build
 npm start
 ```
 
-## 명령어
+## Deploy (Koyeb)
 
-- `/추첨`: 즉시 랜덤 유저를 추첨하여 메시지를 보냅니다. (인원/제한 옵션 제공, 봇이 재시작될 때 명령어가 등록됩니다. 등록 완료 로그가 뜨면 사용 가능합니다.)
-- `/통계`: 개인/서버 메시지 및 단어 통계를 보여줍니다. (기간/순위 옵션 제공)
+- Docker 없이 Node 서비스로 배포 가능
+- Start Command 예시:
+
+```bash
+npm run build && npm start
+```
+
+- Koyeb 환경변수에 `.env` 값들을 동일하게 등록
+- 배포 후 `/` 엔드포인트 응답(`Discord Bot is alive!`)으로 헬스체크 확인

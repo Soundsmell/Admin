@@ -1,18 +1,31 @@
 import {
+  ActionRowBuilder,
+  ButtonInteraction,
+  ChatInputCommandInteraction,
   Client,
+  CommandInteractionOptionResolver,
   GatewayIntentBits,
-  TextChannel,
+  Guild,
+  Interaction,
+  InteractionEditReplyOptions,
+  InteractionReplyOptions,
+  ModalBuilder,
+  ModalSubmitInteraction,
+  TextBasedChannel,
+  ButtonBuilder,
+  ButtonStyle,
   GuildMember,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder,
-  PermissionFlagsBits,
-  ButtonBuilder,
-  ButtonStyle
+  TextInputBuilder,
+  TextInputStyle
 } from 'discord.js'
 import dotenv from 'dotenv'
 import cron from 'node-cron'
 import express from 'express'
+import { Pool } from 'pg'
 import {
   buildStatsButtons,
   buildStatsEmbed,
@@ -31,9 +44,42 @@ import {
 
 dotenv.config()
 
+type ReplyPayload = InteractionReplyOptions
+type UpdatePayload = InteractionEditReplyOptions
+const DEFAULT_DRAW_COUNT = 2
+const DRAW_COUNT_MIN = 1
+const DRAW_COUNT_MAX = 10
+const BONUS_DRAW_CHANCE = 0.02
+const BONUS_DRAW_EXTRA_COUNT = 3
+const DEFAULT_AUTO_DRAW_TIME = '20:00'
+const AUTO_DRAW_TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+type AutoDrawConfig = {
+  guildId: string
+  channelId: string
+  hour: number
+  minute: number
+}
+type AutoDrawPanelState = {
+  ownerId: string
+  channelId: string
+  hour: number
+  minute: number
+  enabled: boolean
+}
+
+const databaseUrl = process.env.DATABASE_URL
+const settingsPool = new Pool({
+  connectionString: databaseUrl,
+  ssl: databaseUrl?.includes('sslmode=require')
+    ? { rejectUnauthorized: false }
+    : undefined
+})
+const autoDrawTasks = new Map<string, cron.ScheduledTask>()
+
 async function safeReply(
-  interaction: { replied: boolean; deferred: boolean; reply: Function; followUp: Function },
-  options: Record<string, unknown>
+  interaction: ButtonInteraction | ChatInputCommandInteraction,
+  options: ReplyPayload
 ) {
   if (interaction.replied || interaction.deferred) {
     return interaction.followUp(options)
@@ -42,8 +88,8 @@ async function safeReply(
 }
 
 async function safeUpdate(
-  interaction: { replied: boolean; deferred: boolean; update: Function; editReply: Function },
-  options: Record<string, unknown>
+  interaction: ButtonInteraction,
+  options: UpdatePayload
 ) {
   if (interaction.replied || interaction.deferred) {
     return interaction.editReply(options)
@@ -152,8 +198,308 @@ const commands = [
           { name: '50', value: 50 },
           { name: '100', value: 100 }
         )
-    )
+    ),
+  new SlashCommandBuilder()
+    .setName('추첨설정')
+    .setDescription('자동 추첨 ON/OFF, 채널, 시간을 설정합니다')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 ]
+
+function parseDailyTime(timeInput: string) {
+  const normalized = timeInput.trim()
+  const matched = AUTO_DRAW_TIME_REGEX.exec(normalized)
+  if (!matched) return null
+  const hour = Number(matched[1])
+  const minute = Number(matched[2])
+  return { hour, minute, normalized }
+}
+
+function buildCronExpression(hour: number, minute: number) {
+  return `${minute} ${hour} * * *`
+}
+
+function formatTime(hour: number, minute: number) {
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function buildAutoDrawSetupSuccessEmbed(args: {
+  channelId: string
+  hour: number
+  minute: number
+  bonusChance: number
+  bonusExtraCount: number
+  enabled: boolean
+}) {
+  const { channelId, hour, minute, bonusChance, bonusExtraCount, enabled } = args
+  const chanceLabel = `${Math.round(bonusChance * 100)}%`
+  const timeLabel = formatTime(hour, minute)
+
+  return {
+    color: 0x7c3aed,
+    title: '⏰ 추첨 설정 저장 완료',
+    description: '자동 추첨 설정이 업데이트되었어요.',
+    fields: [
+      {
+        name: '상태',
+        value: enabled ? 'ON (활성화)' : 'OFF (비활성화)',
+        inline: true
+      },
+      {
+        name: '채널',
+        value: `<#${channelId}>`,
+        inline: true
+      },
+      {
+        name: '시간',
+        value: `${timeLabel} (KST)`,
+        inline: true
+      },
+      {
+        name: '보너스 이벤트',
+        value: `${chanceLabel} 확률로 +${bonusExtraCount}명 추가 당첨`,
+        inline: false
+      },
+      {
+        name: '안내',
+        value: '변경하려면 `/추첨설정`을 다시 실행하세요.',
+        inline: false
+      }
+    ],
+    footer: {
+      text: 'Daily Admin Bot'
+    }
+  }
+}
+
+function buildAutoDrawPanelEmbed(state: AutoDrawPanelState) {
+  return {
+    color: 0x7c3aed,
+    title: '⚙️ 추첨 설정 패널',
+    description: '1) 상태/채널/시간을 설정하고 2) 저장을 누르세요.',
+    fields: [
+      {
+        name: '상태',
+        value: state.enabled ? 'ON (활성화)' : 'OFF (비활성화)',
+        inline: true
+      },
+      {
+        name: '채널',
+        value: `<#${state.channelId}>`,
+        inline: true
+      },
+      {
+        name: '시간',
+        value: `${formatTime(state.hour, state.minute)} (KST)`,
+        inline: true
+      },
+      {
+        name: '보너스 이벤트',
+        value: `${Math.round(BONUS_DRAW_CHANCE * 100)}% 확률로 +${BONUS_DRAW_EXTRA_COUNT}명`,
+        inline: false
+      }
+    ],
+    footer: {
+      text: '설정은 저장 버튼을 눌러야 적용됩니다.'
+    }
+  }
+}
+
+function encodeAutoDrawState(
+  action: 'toggle' | 'setch' | 'time' | 'save' | 'cancel',
+  state: AutoDrawPanelState
+) {
+  return `autodraw:${action}:${state.ownerId}:${state.channelId}:${state.hour}:${state.minute}:${state.enabled ? 1 : 0}`
+}
+
+function parseAutoDrawState(customId: string) {
+  const parts = customId.split(':')
+  if (parts.length !== 7) return null
+  if (parts[0] !== 'autodraw') return null
+  const action = parts[1]
+  if (
+    action !== 'toggle' &&
+    action !== 'setch' &&
+    action !== 'time' &&
+    action !== 'save' &&
+    action !== 'cancel'
+  ) {
+    return null
+  }
+  const hour = Number(parts[4])
+  const minute = Number(parts[5])
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+  if (parts[6] !== '0' && parts[6] !== '1') return null
+  return {
+    action: action as 'toggle' | 'setch' | 'time' | 'save' | 'cancel',
+    state: {
+      ownerId: parts[2],
+      channelId: parts[3],
+      hour,
+      minute,
+      enabled: parts[6] === '1'
+    } as AutoDrawPanelState
+  }
+}
+
+function makeAutoDrawTimeModalCustomId(state: AutoDrawPanelState) {
+  return `autodrawm:${state.ownerId}:${state.channelId}:${state.hour}:${state.minute}:${state.enabled ? 1 : 0}`
+}
+
+function parseAutoDrawTimeModalCustomId(customId: string) {
+  const parts = customId.split(':')
+  if (parts.length !== 6) return null
+  if (parts[0] !== 'autodrawm') return null
+  const hour = Number(parts[3])
+  const minute = Number(parts[4])
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+  if (parts[5] !== '0' && parts[5] !== '1') return null
+  return {
+    ownerId: parts[1],
+    channelId: parts[2],
+    hour,
+    minute,
+    enabled: parts[5] === '1'
+  } as AutoDrawPanelState
+}
+
+function buildAutoDrawPanelButtons(state: AutoDrawPanelState) {
+  const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(encodeAutoDrawState('toggle', state))
+      .setLabel(state.enabled ? '상태: ON -> OFF' : '상태: OFF -> ON')
+      .setStyle(state.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(encodeAutoDrawState('setch', state))
+      .setLabel('채널: 현재 채널로')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(encodeAutoDrawState('time', state))
+      .setLabel('시간 변경')
+      .setStyle(ButtonStyle.Secondary)
+  )
+  const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(encodeAutoDrawState('save', state))
+      .setLabel('저장')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(encodeAutoDrawState('cancel', state))
+      .setLabel('취소')
+      .setStyle(ButtonStyle.Danger)
+  )
+  return [row1, row2]
+}
+
+async function ensureAutoDrawTable() {
+  if (!databaseUrl) return
+  await settingsPool.query(`
+    CREATE TABLE IF NOT EXISTS auto_draw_settings (
+      guild_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      hour SMALLINT NOT NULL CHECK (hour BETWEEN 0 AND 23),
+      minute SMALLINT NOT NULL CHECK (minute BETWEEN 0 AND 59),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+}
+
+async function getAllAutoDrawConfigs(): Promise<AutoDrawConfig[]> {
+  if (!databaseUrl) return []
+  const result = await settingsPool.query(
+    `SELECT guild_id, channel_id, hour, minute FROM auto_draw_settings`
+  )
+  return result.rows.map(
+    (row: {
+      guild_id: string
+      channel_id: string
+      hour: number
+      minute: number
+    }) => ({
+      guildId: row.guild_id,
+      channelId: row.channel_id,
+      hour: row.hour,
+      minute: row.minute
+    })
+  )
+}
+
+async function getAutoDrawConfigByGuildId(
+  guildId: string
+): Promise<AutoDrawConfig | null> {
+  if (!databaseUrl) return null
+  const result = await settingsPool.query(
+    `SELECT guild_id, channel_id, hour, minute FROM auto_draw_settings WHERE guild_id = $1`,
+    [guildId]
+  )
+  const row = result.rows[0] as
+    | {
+        guild_id: string
+        channel_id: string
+        hour: number
+        minute: number
+      }
+    | undefined
+  if (!row) return null
+  return {
+    guildId: row.guild_id,
+    channelId: row.channel_id,
+    hour: row.hour,
+    minute: row.minute
+  }
+}
+
+async function upsertAutoDrawConfig(config: AutoDrawConfig) {
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL is not set.')
+  }
+  await settingsPool.query(
+    `
+      INSERT INTO auto_draw_settings (guild_id, channel_id, hour, minute, updated_at)
+      VALUES ($1, $2, $3, $4, now())
+      ON CONFLICT (guild_id)
+      DO UPDATE SET channel_id = EXCLUDED.channel_id,
+                    hour = EXCLUDED.hour,
+                    minute = EXCLUDED.minute,
+                    updated_at = now()
+    `,
+    [config.guildId, config.channelId, config.hour, config.minute]
+  )
+}
+
+async function deleteAutoDrawConfig(guildId: string) {
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL is not set.')
+  }
+  await settingsPool.query(`DELETE FROM auto_draw_settings WHERE guild_id = $1`, [
+    guildId
+  ])
+}
+
+function unscheduleAutoDraw(guildId: string) {
+  const existing = autoDrawTasks.get(guildId)
+  if (!existing) return
+  existing.stop()
+  existing.destroy()
+  autoDrawTasks.delete(guildId)
+}
+
+function scheduleAutoDraw(config: AutoDrawConfig) {
+  unscheduleAutoDraw(config.guildId)
+  const cronExpression = buildCronExpression(config.hour, config.minute)
+  const task = cron.schedule(
+    cronExpression,
+    async () => {
+      await runDailyTask(config.channelId, DEFAULT_DRAW_COUNT, [], true)
+    },
+    {
+      scheduled: true,
+      timezone: 'Asia/Seoul'
+    }
+  )
+  autoDrawTasks.set(config.guildId, task)
+}
 
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}!`)
@@ -176,299 +522,610 @@ client.once('ready', async () => {
     console.error(error)
   }
 
-  cron.schedule(
-    '0 20 * * *',
-    async () => {
-      console.log('Running daily task...')
-      await runDailyTask()
-    },
-    {
-      scheduled: true,
-      timezone: 'Asia/Seoul'
+  try {
+    await ensureAutoDrawTable()
+    const configs = await getAllAutoDrawConfigs()
+    if (configs.length === 0 && process.env.TARGET_CHANNEL_ID) {
+      const defaultParsed = parseDailyTime(DEFAULT_AUTO_DRAW_TIME)!
+      scheduleAutoDraw({
+        guildId: `legacy:${process.env.TARGET_CHANNEL_ID}`,
+        channelId: process.env.TARGET_CHANNEL_ID,
+        hour: defaultParsed.hour,
+        minute: defaultParsed.minute
+      })
+      console.log('Scheduled legacy auto draw from TARGET_CHANNEL_ID at 20:00.')
+    } else {
+      configs.forEach(scheduleAutoDraw)
+      console.log(`Scheduled auto draw tasks: ${configs.length}`)
     }
-  )
+  } catch (error) {
+    console.error('Failed to initialize auto draw schedules:', error)
+  }
 })
 
-client.on('interactionCreate', async interaction => {
-  if (interaction.isButton()) {
-    const participantsParsed = parseParticipantsCustomId(interaction.customId)
-    if (participantsParsed) {
-      if (!interaction.guildId) {
-        await safeReply(interaction, {
-          content: '서버에서만 사용할 수 있어요.',
-          ephemeral: true
-        })
-        return
-      }
+function getNextPage(action: 'prev' | 'next' | 'open', currentPage: number) {
+  if (action === 'next') return currentPage + 1
+  if (action === 'prev') return Math.max(currentPage - 1, 0)
+  return currentPage
+}
 
-      if (!interaction.guild) {
-        await safeReply(interaction, {
-          content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
-          ephemeral: true
-        })
-        return
-      }
+function ensureGuildContext(interaction: {
+  guildId: string | null
+  guild: Guild | null
+}) {
+  if (!interaction.guildId) return 'no-guild-id' as const
+  if (!interaction.guild) return 'no-guild' as const
+  return 'ok' as const
+}
 
-      if (interaction.user.id !== participantsParsed.ownerId) {
-        await safeReply(interaction, {
-          content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
-          ephemeral: true
-        })
-        return
-      }
+async function replyGuildOnly(
+  interaction: ButtonInteraction | ChatInputCommandInteraction
+) {
+  await safeReply(interaction, {
+    content: '서버에서만 사용할 수 있어요.',
+    ephemeral: true
+  })
+}
 
-      const nextPage =
-        participantsParsed.action === 'next'
-          ? participantsParsed.page + 1
-          : participantsParsed.action === 'prev'
-            ? Math.max(participantsParsed.page - 1, 0)
-            : participantsParsed.page
+async function replyGuildUnavailable(interaction: ButtonInteraction) {
+  await safeReply(interaction, {
+    content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
+    ephemeral: true
+  })
+}
 
-      const result = await fetchParticipantsPage({
-        period: participantsParsed.period,
-        page: nextPage,
-        pageSize: PARTICIPANT_PAGE_SIZE,
-        guildId: interaction.guildId
-      })
+async function replyOwnerOnly(interaction: ButtonInteraction) {
+  await safeReply(interaction, {
+    content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
+    ephemeral: true
+  })
+}
 
-      const userId = result.userIds[0]
-      const member = userId
-        ? await interaction.guild.members.fetch(userId).catch(() => null)
-        : null
-      const embed = buildParticipantsEmbed({
-        period: participantsParsed.period,
-        guildName: interaction.guild?.name,
-        totalCount: result.totalCount,
-        page: nextPage,
-        memberName: member?.displayName ?? '알 수 없음',
-        avatarUrl: member?.displayAvatarURL() ?? null
-      })
+function hasAdministratorPermission(
+  interaction: ButtonInteraction | ChatInputCommandInteraction | ModalSubmitInteraction
+) {
+  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false
+}
 
-      const participantsBase = makeParticipantsCustomId(
-        participantsParsed.ownerId,
-        participantsParsed.period,
-        participantsParsed.rank
-      )
-      const statsBase = makeCustomBase(
-        participantsParsed.ownerId,
-        'guild',
-        participantsParsed.period,
-        participantsParsed.rank
-      )
-      const row = buildParticipantsButtons(
-        participantsBase,
-        nextPage,
-        nextPage > 0,
-        result.hasNext,
-        statsBase
-      )
+async function replyAdminOnly(
+  interaction: ButtonInteraction | ChatInputCommandInteraction | ModalSubmitInteraction
+) {
+  if (interaction.isModalSubmit()) {
+    await interaction.reply({
+      content: '이 기능은 관리자만 사용할 수 있어요.',
+      ephemeral: true
+    })
+    return
+  }
+  await safeReply(interaction, {
+    content: '이 기능은 관리자만 사용할 수 있어요.',
+    ephemeral: true
+  })
+}
 
-      await safeUpdate(interaction, { embeds: [embed], components: [row] })
-      return
-    }
+async function handleParticipantsButton(interaction: ButtonInteraction) {
+  const parsed = parseParticipantsCustomId(interaction.customId)
+  if (!parsed) return false
+
+  const guildContext = ensureGuildContext(interaction)
+  if (guildContext === 'no-guild-id') {
+    await replyGuildOnly(interaction)
+    return true
+  }
+  if (guildContext === 'no-guild') {
+    await replyGuildUnavailable(interaction)
+    return true
   }
 
-  if (interaction.isButton()) {
-    const parsed = parseStatsCustomId(interaction.customId)
-    if (!parsed) return
+  if (interaction.user.id !== parsed.ownerId) {
+    await replyOwnerOnly(interaction)
+    return true
+  }
 
-    if (!interaction.guildId) {
-      await safeReply(interaction, {
-        content: '서버에서만 사용할 수 있어요.',
-        ephemeral: true
-      })
-      return
-    }
+  const nextPage = getNextPage(parsed.action, parsed.page)
+  const result = await fetchParticipantsPage({
+    period: parsed.period,
+    page: nextPage,
+    pageSize: PARTICIPANT_PAGE_SIZE,
+    guildId: interaction.guildId
+  })
 
-    if (interaction.user.id !== parsed.ownerId) {
-      await safeReply(interaction, {
-        content: '이 통계는 명령어를 실행한 사람만 조작할 수 있어요.',
-        ephemeral: true
-      })
-      return
-    }
+  const userId = result.userIds[0]
+  const member = userId
+    ? await interaction.guild.members.fetch(userId).catch(() => null)
+    : null
+  const embed = buildParticipantsEmbed({
+    period: parsed.period,
+    guildName: interaction.guild?.name,
+    totalCount: result.totalCount,
+    page: nextPage,
+    memberName: member?.displayName ?? '알 수 없음',
+    avatarUrl: member?.displayAvatarURL() ?? null
+  })
 
-    const nextPage =
-      parsed.action === 'next'
-        ? parsed.page + 1
-        : parsed.action === 'prev'
-          ? Math.max(parsed.page - 1, 0)
-          : parsed.page
-    const result = await fetchStatsPage({
-      scope: parsed.scope,
-      period: parsed.period,
-      rank: parsed.rank,
-      page: nextPage,
-      pageSize: PAGE_SIZE,
-      userId: interaction.user.id,
-      guildId: interaction.guildId
-    })
+  const participantsBase = makeParticipantsCustomId(
+    parsed.ownerId,
+    parsed.period,
+    parsed.rank
+  )
+  const statsBase = makeCustomBase(
+    parsed.ownerId,
+    'guild',
+    parsed.period,
+    parsed.rank
+  )
+  const row = buildParticipantsButtons(
+    participantsBase,
+    nextPage,
+    nextPage > 0,
+    result.hasNext,
+    statsBase
+  )
 
-    if (!interaction.guild) {
-      await safeReply(interaction, {
-        content: '서버 정보를 가져올 수 없어요. 잠시 후 다시 시도해주세요.',
-        ephemeral: true
-      })
-      return
-    }
+  await safeUpdate(interaction, { embeds: [embed], components: [row] })
+  return true
+}
 
-    const member =
-      parsed.scope === 'user'
-        ? await interaction.guild.members.fetch(interaction.user.id)
-        : null
-    const guild = interaction.guild
-    const targetLabel =
-      parsed.scope === 'user'
-        ? `<@${interaction.user.id}>`
-        : (guild?.name ?? '서버')
-    const customBase = makeCustomBase(
-      parsed.ownerId,
-      parsed.scope,
+async function handleStatsButton(interaction: ButtonInteraction) {
+  const parsed = parseStatsCustomId(interaction.customId)
+  if (!parsed) return false
+
+  const guildContext = ensureGuildContext(interaction)
+  if (guildContext === 'no-guild-id') {
+    await replyGuildOnly(interaction)
+    return true
+  }
+  if (guildContext === 'no-guild') {
+    await replyGuildUnavailable(interaction)
+    return true
+  }
+
+  if (interaction.user.id !== parsed.ownerId) {
+    await replyOwnerOnly(interaction)
+    return true
+  }
+
+  const nextPage = getNextPage(parsed.action, parsed.page)
+  const result = await fetchStatsPage({
+    scope: parsed.scope,
+    period: parsed.period,
+    rank: parsed.rank,
+    page: nextPage,
+    pageSize: PAGE_SIZE,
+    userId: interaction.user.id,
+    guildId: interaction.guildId
+  })
+
+  const member =
+    parsed.scope === 'user'
+      ? await interaction.guild.members.fetch(interaction.user.id)
+      : null
+  const guild = interaction.guild
+  const targetLabel =
+    parsed.scope === 'user' ? `<@${interaction.user.id}>` : (guild?.name ?? '서버')
+  const customBase = makeCustomBase(
+    parsed.ownerId,
+    parsed.scope,
+    parsed.period,
+    parsed.rank
+  )
+  const embed = buildStatsEmbed({
+    scope: parsed.scope,
+    period: parsed.period,
+    targetLabel,
+    totalMessages: result.totalMessages,
+    words: result.words,
+    page: nextPage,
+    pageSize: PAGE_SIZE,
+    totalCount: result.totalCount,
+    participantCount: result.participantCount,
+    memberName: member?.displayName ?? undefined,
+    joinedAt: member?.joinedAt ?? undefined,
+    avatarUrl: member?.displayAvatarURL() ?? undefined,
+    guildName: guild?.name ?? undefined,
+    guildCreatedAt: guild?.createdAt ?? undefined,
+    guildIconUrl: guild?.iconURL() ?? undefined
+  })
+  const row = buildStatsButtons(customBase, nextPage, nextPage > 0, result.hasNext)
+
+  if (parsed.scope === 'guild') {
+    const participantsBase = makeParticipantsCustomId(
+      interaction.user.id,
       parsed.period,
       parsed.rank
     )
-    const embed = buildStatsEmbed({
-      scope: parsed.scope,
-      period: parsed.period,
-      targetLabel,
-      totalMessages: result.totalMessages,
-      words: result.words,
-      page: nextPage,
-      pageSize: PAGE_SIZE,
-      totalCount: result.totalCount,
-      participantCount: result.participantCount,
-      memberName: member?.displayName ?? undefined,
-      joinedAt: member?.joinedAt ?? undefined,
-      avatarUrl: member?.displayAvatarURL() ?? undefined,
-      guildName: guild?.name ?? undefined,
-      guildCreatedAt: guild?.createdAt ?? undefined,
-      guildIconUrl: guild?.iconURL() ?? undefined
-    })
-    const row = buildStatsButtons(
-      customBase,
-      nextPage,
-      nextPage > 0,
-      result.hasNext
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${participantsBase}:open:0`)
+        .setLabel('참여자')
+        .setStyle(ButtonStyle.Primary)
     )
+  }
 
-    if (parsed.scope === 'guild') {
-      const participantsBase = makeParticipantsCustomId(
-        interaction.user.id,
-        parsed.period,
-        parsed.rank
-      )
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`${participantsBase}:open:0`)
-          .setLabel('참여자')
-          .setStyle(ButtonStyle.Primary)
-      )
-    }
+  await safeUpdate(interaction, { embeds: [embed], components: [row] })
+  return true
+}
 
-    await safeUpdate(interaction, { embeds: [embed], components: [row] })
+function getCommandOptions(
+  interaction: ChatInputCommandInteraction
+): CommandInteractionOptionResolver {
+  return interaction.options as CommandInteractionOptionResolver
+}
+
+async function handleDrawCommand(interaction: ChatInputCommandInteraction) {
+  const options = getCommandOptions(interaction)
+  const drawCountRaw = options.getInteger('인원') ?? DEFAULT_DRAW_COUNT
+  const drawCount = Math.min(
+    DRAW_COUNT_MAX,
+    Math.max(DRAW_COUNT_MIN, drawCountRaw)
+  )
+  const restrictedUsers = [
+    options.getUser('제한1'),
+    options.getUser('제한2'),
+    options.getUser('제한3'),
+    options.getUser('제한4'),
+    options.getUser('제한5')
+  ].filter((user): user is NonNullable<typeof user> => Boolean(user))
+  const restrictedIds = restrictedUsers.map(user => user.id)
+
+  await safeReply(interaction, {
+    content: '추첨을 시작합니다...',
+    ephemeral: true
+  })
+  await runDailyTask(interaction.channelId, drawCount, restrictedIds)
+}
+
+async function handleStatsCommand(interaction: ChatInputCommandInteraction) {
+  const options = getCommandOptions(interaction)
+  if (!interaction.guildId) {
+    await replyGuildOnly(interaction)
     return
   }
 
-  if (!interaction.isChatInputCommand()) return
-
-  if (interaction.commandName === '추첨') {
-    const drawCount = interaction.options.getInteger('인원') ?? 2
-    const restrictedUsers = [
-      interaction.options.getUser('제한1'),
-      interaction.options.getUser('제한2'),
-      interaction.options.getUser('제한3'),
-      interaction.options.getUser('제한4'),
-      interaction.options.getUser('제한5')
-    ].filter(Boolean)
-    const restrictedIds = restrictedUsers.map(user => user!.id)
-
+  if (!process.env.DATABASE_URL) {
     await safeReply(interaction, {
-      content: '추첨을 시작합니다...',
+      content: 'DATABASE_URL 설정이 필요해요.',
       ephemeral: true
     })
-    await runDailyTask(interaction.channelId, drawCount, restrictedIds)
+    return
   }
 
-  if (interaction.commandName === '통계') {
-    if (!interaction.guildId) {
+  const scopeRaw = options.getString('대상', true)
+  if (scopeRaw !== 'user' && scopeRaw !== 'guild') {
+    await safeReply(interaction, {
+      content: '잘못된 대상 값이에요. 다시 시도해주세요.',
+      ephemeral: true
+    })
+    return
+  }
+
+  const periodRaw = options.getString('기간')
+  const period =
+    periodRaw === 'day' ||
+    periodRaw === 'week' ||
+    periodRaw === 'month' ||
+    periodRaw === 'all'
+      ? periodRaw
+      : 'month'
+  const rankRaw = options.getInteger('순위') ?? 10
+  const rank = Math.max(1, rankRaw)
+  const scope = scopeRaw
+
+  const customBase = makeCustomBase(interaction.user.id, scope, period, rank)
+  const result = await fetchStatsPage({
+    scope,
+    period,
+    rank,
+    page: 0,
+    pageSize: PAGE_SIZE,
+    userId: interaction.user.id,
+    guildId: interaction.guildId
+  })
+
+  const member =
+    scope === 'user'
+      ? await interaction.guild?.members.fetch(interaction.user.id)
+      : null
+  const guild = interaction.guild
+  const targetLabel =
+    scope === 'user' ? `<@${interaction.user.id}>` : (guild?.name ?? '서버')
+  const embed = buildStatsEmbed({
+    scope,
+    period,
+    targetLabel,
+    totalMessages: result.totalMessages,
+    words: result.words,
+    page: 0,
+    pageSize: PAGE_SIZE,
+    totalCount: result.totalCount,
+    participantCount: result.participantCount,
+    memberName: member?.displayName ?? undefined,
+    joinedAt: member?.joinedAt ?? undefined,
+    avatarUrl: member?.displayAvatarURL() ?? undefined,
+    guildName: guild?.name ?? undefined,
+    guildCreatedAt: guild?.createdAt ?? undefined,
+    guildIconUrl: guild?.iconURL() ?? undefined
+  })
+  const row = buildStatsButtons(customBase, 0, false, result.hasNext)
+
+  if (scope === 'guild') {
+    const participantsBase = makeParticipantsCustomId(
+      interaction.user.id,
+      period,
+      rank
+    )
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${participantsBase}:open:0`)
+        .setLabel('참여자')
+        .setStyle(ButtonStyle.Primary)
+    )
+  }
+
+  await safeReply(interaction, { embeds: [embed], components: [row] })
+}
+
+async function handleAutoDrawSetupCommand(
+  interaction: ChatInputCommandInteraction
+) {
+  if (!hasAdministratorPermission(interaction)) {
+    await replyAdminOnly(interaction)
+    return
+  }
+
+  const guildContext = ensureGuildContext(interaction)
+  if (guildContext === 'no-guild-id' || guildContext === 'no-guild') {
+    await replyGuildOnly(interaction)
+    return
+  }
+  if (!databaseUrl) {
+    await safeReply(interaction, {
+      content: '자동 추첨 설정에는 DATABASE_URL이 필요해요.',
+      ephemeral: true
+    })
+    return
+  }
+
+  const defaultParsed = parseDailyTime(DEFAULT_AUTO_DRAW_TIME)
+  if (!defaultParsed) {
+    await safeReply(interaction, {
+      content: '기본 시간 설정을 읽지 못했어요.',
+      ephemeral: true
+    })
+    return
+  }
+  const existingConfig = await getAutoDrawConfigByGuildId(interaction.guildId!)
+  const state: AutoDrawPanelState = {
+    ownerId: interaction.user.id,
+    channelId: existingConfig?.channelId ?? interaction.channelId,
+    hour: existingConfig?.hour ?? defaultParsed.hour,
+    minute: existingConfig?.minute ?? defaultParsed.minute,
+    enabled: Boolean(existingConfig)
+  }
+
+  await safeReply(interaction, {
+    embeds: [buildAutoDrawPanelEmbed(state)],
+    components: buildAutoDrawPanelButtons(state),
+    ephemeral: true
+  })
+}
+
+async function handleUnexpectedInteractionError(
+  interaction: ButtonInteraction | ChatInputCommandInteraction,
+  error: unknown
+) {
+  console.error('interactionCreate failed:', error)
+  try {
+    await safeReply(interaction, {
+      content: '처리 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.',
+      ephemeral: true
+    })
+  } catch (replyError) {
+    console.error('Failed to send error reply:', replyError)
+  }
+}
+
+async function handleAutoDrawPanelButton(interaction: ButtonInteraction) {
+  const parsed = parseAutoDrawState(interaction.customId)
+  if (!parsed) return false
+
+  const guildContext = ensureGuildContext(interaction)
+  if (guildContext === 'no-guild-id' || guildContext === 'no-guild') {
+    await replyGuildOnly(interaction)
+    return true
+  }
+  if (interaction.user.id !== parsed.state.ownerId) {
+    await safeReply(interaction, {
+      content: '이 설정 패널은 명령어를 실행한 사람만 사용할 수 있어요.',
+      ephemeral: true
+    })
+    return true
+  }
+  if (!hasAdministratorPermission(interaction)) {
+    await replyAdminOnly(interaction)
+    return true
+  }
+  if (!databaseUrl) {
+    await safeReply(interaction, {
+      content: '자동 추첨 설정에는 DATABASE_URL이 필요해요.',
+      ephemeral: true
+    })
+    return true
+  }
+
+  if (parsed.action === 'cancel') {
+    await safeUpdate(interaction, {
+      content: '자동 추첨 설정을 취소했어요.',
+      embeds: [],
+      components: []
+    })
+    return true
+  }
+
+  if (parsed.action === 'toggle') {
+    const nextState: AutoDrawPanelState = {
+      ...parsed.state,
+      enabled: !parsed.state.enabled
+    }
+    await safeUpdate(interaction, {
+      embeds: [buildAutoDrawPanelEmbed(nextState)],
+      components: buildAutoDrawPanelButtons(nextState)
+    })
+    return true
+  }
+
+  if (parsed.action === 'setch') {
+    const channel = interaction.channel
+    if (!channel || !('id' in channel)) {
       await safeReply(interaction, {
-        content: '서버에서만 사용할 수 있어요.',
+        content: '현재 채널 정보를 읽을 수 없어요.',
         ephemeral: true
       })
-      return
+      return true
     }
-
-    if (!process.env.DATABASE_URL) {
-      await safeReply(interaction, {
-        content: 'DATABASE_URL 설정이 필요해요.',
-        ephemeral: true
-      })
-      return
+    const nextState: AutoDrawPanelState = {
+      ...parsed.state,
+      channelId: channel.id
     }
-
-    const scope = interaction.options.getString('대상', true) as
-      | 'user'
-      | 'guild'
-    const period =
-      (interaction.options.getString('기간') as
-        | 'day'
-        | 'week'
-        | 'month'
-        | 'all') ?? 'month'
-    const rank = interaction.options.getInteger('순위') ?? 10
-
-    const customBase = makeCustomBase(interaction.user.id, scope, period, rank)
-    const result = await fetchStatsPage({
-      scope,
-      period,
-      rank,
-      page: 0,
-      pageSize: PAGE_SIZE,
-      userId: interaction.user.id,
-      guildId: interaction.guildId
+    await safeUpdate(interaction, {
+      embeds: [buildAutoDrawPanelEmbed(nextState)],
+      components: buildAutoDrawPanelButtons(nextState)
     })
+    return true
+  }
 
-    const member =
-      scope === 'user'
-        ? await interaction.guild?.members.fetch(interaction.user.id)
-        : null
-    const guild = interaction.guild
-    const targetLabel =
-      scope === 'user' ? `<@${interaction.user.id}>` : (guild?.name ?? '서버')
-    const embed = buildStatsEmbed({
-      scope,
-      period,
-      targetLabel,
-      totalMessages: result.totalMessages,
-      words: result.words,
-      page: 0,
-      pageSize: PAGE_SIZE,
-      totalCount: result.totalCount,
-      participantCount: result.participantCount,
-      memberName: member?.displayName ?? undefined,
-      joinedAt: member?.joinedAt ?? undefined,
-      avatarUrl: member?.displayAvatarURL() ?? undefined,
-      guildName: guild?.name ?? undefined,
-      guildCreatedAt: guild?.createdAt ?? undefined,
-      guildIconUrl: guild?.iconURL() ?? undefined
-    })
-    const row = buildStatsButtons(customBase, 0, false, result.hasNext)
+  if (parsed.action === 'time') {
+    const modal = new ModalBuilder()
+      .setCustomId(makeAutoDrawTimeModalCustomId(parsed.state))
+      .setTitle('자동 추첨 시간 설정')
+    const input = new TextInputBuilder()
+      .setCustomId('time_input')
+      .setLabel('시간 (HH:MM, 24시간)')
+      .setPlaceholder('20:00')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setValue(formatTime(parsed.state.hour, parsed.state.minute))
+    const row = new ActionRowBuilder<TextInputBuilder>().addComponents(input)
+    modal.addComponents(row)
+    await interaction.showModal(modal)
+    return true
+  }
 
-    if (scope === 'guild') {
-      const participantsBase = makeParticipantsCustomId(
-        interaction.user.id,
-        period,
-        rank
-      )
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`${participantsBase}:open:0`)
-          .setLabel('참여자')
-          .setStyle(ButtonStyle.Primary)
-      )
+  if (parsed.action === 'save') {
+    if (parsed.state.enabled) {
+      const config: AutoDrawConfig = {
+        guildId: interaction.guildId!,
+        channelId: parsed.state.channelId,
+        hour: parsed.state.hour,
+        minute: parsed.state.minute
+      }
+      await upsertAutoDrawConfig(config)
+      scheduleAutoDraw(config)
+    } else {
+      await deleteAutoDrawConfig(interaction.guildId!)
+      unscheduleAutoDraw(interaction.guildId!)
     }
 
-    await safeReply(interaction, { embeds: [embed], components: [row] })
+    await safeUpdate(interaction, {
+      embeds: [
+        buildAutoDrawSetupSuccessEmbed({
+          channelId: parsed.state.channelId,
+          hour: parsed.state.hour,
+          minute: parsed.state.minute,
+          bonusChance: BONUS_DRAW_CHANCE,
+          bonusExtraCount: BONUS_DRAW_EXTRA_COUNT,
+          enabled: parsed.state.enabled
+        })
+      ],
+      components: []
+    })
+    return true
+  }
+
+  return true
+}
+
+async function handleAutoDrawTimeModal(interaction: ModalSubmitInteraction) {
+  const parsed = parseAutoDrawTimeModalCustomId(interaction.customId)
+  if (!parsed) return false
+
+  if (interaction.user.id !== parsed.ownerId) {
+    await interaction.reply({
+      content: '이 설정 패널은 명령어를 실행한 사람만 사용할 수 있어요.',
+      ephemeral: true
+    })
+    return true
+  }
+  if (!hasAdministratorPermission(interaction)) {
+    await replyAdminOnly(interaction)
+    return true
+  }
+
+  const timeInput = interaction.fields.getTextInputValue('time_input')
+  const time = parseDailyTime(timeInput)
+  if (!time) {
+    await interaction.reply({
+      content: '시간 형식이 올바르지 않아요. 예: 20:00',
+      ephemeral: true
+    })
+    return true
+  }
+
+  const nextState: AutoDrawPanelState = {
+    ...parsed,
+    hour: time.hour,
+    minute: time.minute
+  }
+  await interaction.reply({
+    embeds: [buildAutoDrawPanelEmbed(nextState)],
+    components: buildAutoDrawPanelButtons(nextState),
+    ephemeral: true
+  })
+  return true
+}
+
+client.on('interactionCreate', async (interaction: Interaction) => {
+  if (
+    !interaction.isButton() &&
+    !interaction.isChatInputCommand() &&
+    !interaction.isModalSubmit()
+  ) {
+    return
+  }
+
+  try {
+    if (interaction.isButton()) {
+      const handledAutoDrawPanel = await handleAutoDrawPanelButton(interaction)
+      if (handledAutoDrawPanel) return
+
+      const handledParticipants = await handleParticipantsButton(interaction)
+      if (handledParticipants) return
+
+      const handledStats = await handleStatsButton(interaction)
+      if (handledStats) return
+    }
+
+    if (interaction.isModalSubmit()) {
+      const handledAutoDrawTime = await handleAutoDrawTimeModal(interaction)
+      if (handledAutoDrawTime) return
+    }
+
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName === '추첨') {
+        await handleDrawCommand(interaction)
+        return
+      }
+      if (interaction.commandName === '통계') {
+        await handleStatsCommand(interaction)
+        return
+      }
+      if (interaction.commandName === '추첨설정') {
+        await handleAutoDrawSetupCommand(interaction)
+        return
+      }
+    }
+  } catch (error) {
+    await handleUnexpectedInteractionError(interaction, error)
   }
 })
 
@@ -494,7 +1151,8 @@ client.on('messageCreate', async message => {
 async function runDailyTask(
   targetChannelId?: string,
   drawCount = 2,
-  restrictedUserIds: string[] = []
+  restrictedUserIds: string[] = [],
+  isScheduledRun = false
 ) {
   const channelId = targetChannelId || process.env.TARGET_CHANNEL_ID
 
@@ -504,9 +1162,17 @@ async function runDailyTask(
   }
 
   try {
-    const channel = (await client.channels.fetch(channelId)) as TextChannel
+    const fetchedChannel = await client.channels.fetch(channelId)
+    const channel =
+      fetchedChannel && fetchedChannel.isTextBased()
+        ? (fetchedChannel as TextBasedChannel)
+        : null
     if (!channel) {
       console.error(`Channel with ID ${channelId} not found.`)
+      return
+    }
+    if (!('guild' in channel) || !channel.guild) {
+      console.error(`Channel with ID ${channelId} is not a guild text channel.`)
       return
     }
 
@@ -525,18 +1191,33 @@ async function runDailyTask(
       candidates = candidates.filter(member => restrictedSet.has(member.id))
     }
 
-    if (candidates.size < drawCount) {
+    const bonusTriggered = isScheduledRun && Math.random() < BONUS_DRAW_CHANCE
+    const totalDrawCount = bonusTriggered
+      ? drawCount + BONUS_DRAW_EXTRA_COUNT
+      : drawCount
+
+    if (candidates.size < totalDrawCount) {
       await channel.send(
-        `추첨을 진행하기에 멤버(봇/서버장 제외)가 충분하지 않습니다. (최소 ${drawCount}명 필요)`
+        `추첨을 진행하기에 멤버(봇/서버장 제외)가 충분하지 않습니다. (최소 ${totalDrawCount}명 필요)`
       )
       return
     }
 
     // 랜덤하게 지정한 인원 뽑기
-    const winners = candidates.random(drawCount) as GuildMember[]
+    const randomResult = candidates.random(totalDrawCount)
+    const winners = Array.isArray(randomResult)
+      ? randomResult
+      : randomResult
+        ? [randomResult]
+        : []
+    if (winners.length < totalDrawCount) {
+      await channel.send('추첨 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.')
+      return
+    }
 
     // 메시지 출력
-    const messageContent = `오늘의 독재자 명단: ${winners.map(w => w.toString()).join(', ')}`
+    const bonusLabel = bonusTriggered ? ' 🎉 보너스 이벤트 발동! +3명 추가 당첨' : ''
+    const messageContent = `오늘의 독재자 명단: ${winners.map(w => w.toString()).join(', ')}${bonusLabel}`
 
     await channel.send(messageContent)
   } catch (error) {
