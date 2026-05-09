@@ -6,11 +6,8 @@ import {
 } from 'discord.js'
 import path from 'path'
 import { Pool } from 'pg'
-import { pathToFileURL } from 'url'
-import type {
-  KuromojiBuilder,
-  KuromojiTokenizer
-} from 'kuromoji-ko'
+import { fileURLToPath } from 'url'
+import type { KuromojiBuilder, KuromojiTokenizer } from 'kuromoji-ko'
 
 export type Period = 'day' | 'week' | 'month' | 'all'
 export type Scope = 'user' | 'guild'
@@ -40,6 +37,21 @@ type ParticipantPageResult = {
 let tokenizerPromise: Promise<KuromojiTokenizer | null> | null = null
 let lastTokenizerInitFailedAt = 0
 const TOKENIZER_RETRY_MS = 60_000
+const enableTokenizerDebugLog = process.env.NODE_ENV !== 'production'
+
+function logTokenizerFallback(error?: unknown) {
+  if (!enableTokenizerDebugLog) return
+  if (error) {
+    console.debug(
+      'kuromoji-ko tokenizer init failed, fallback tokenization used.',
+      error
+    )
+    return
+  }
+  console.debug(
+    'kuromoji-ko tokenizer init failed, fallback tokenization used.'
+  )
+}
 const databaseUrl = process.env.DATABASE_URL
 const pool = new Pool({
   connectionString: databaseUrl,
@@ -89,20 +101,24 @@ function fallbackTokenize(text: string) {
 }
 
 function resolveKuromojiDicPath() {
-  const toFileUrl = (targetPath: string) => {
+  const normalizeLocalPath = (targetPath: string) => {
     const normalizedPath = path.isAbsolute(targetPath)
       ? targetPath
       : path.resolve(targetPath)
-    const url = pathToFileURL(normalizedPath).toString()
-    return url.endsWith('/') ? url : `${url}/`
+    return normalizedPath.endsWith(path.sep)
+      ? normalizedPath
+      : `${normalizedPath}${path.sep}`
   }
 
   const fromEnv = process.env.KUROMOJI_DICT_PATH?.trim()
   if (fromEnv) {
-    if (/^https?:\/\//i.test(fromEnv) || fromEnv.startsWith('file://')) {
+    if (/^https?:\/\//i.test(fromEnv)) {
       return fromEnv.endsWith('/') ? fromEnv : `${fromEnv}/`
     }
-    return toFileUrl(fromEnv)
+    if (fromEnv.startsWith('file://')) {
+      return normalizeLocalPath(fileURLToPath(fromEnv))
+    }
+    return normalizeLocalPath(fromEnv)
   }
 
   const candidatePaths: string[] = []
@@ -123,7 +139,7 @@ function resolveKuromojiDicPath() {
 
   for (const candidatePath of candidatePaths) {
     if (candidatePath && require('fs').existsSync(candidatePath)) {
-      return toFileUrl(candidatePath)
+      return normalizeLocalPath(candidatePath)
     }
   }
 
@@ -158,7 +174,7 @@ async function createKuromojiTokenizer(): Promise<KuromojiTokenizer | null> {
       })
     })
   } catch (error) {
-    console.warn('kuromoji-ko tokenizer init failed, fallback tokenization used.')
+    logTokenizerFallback(error)
     return null
   }
 }
@@ -185,7 +201,7 @@ async function getTokenizer() {
         return tokenizer
       })
       .catch(error => {
-        console.warn('kuromoji-ko tokenizer init failed, fallback tokenization used.')
+        logTokenizerFallback(error)
         lastTokenizerInitFailedAt = Date.now()
         tokenizerPromise = null
         return null
@@ -227,7 +243,7 @@ async function analyzeWords(text: string): Promise<string[]> {
 
     return words
   } catch (error) {
-    console.warn('kuromoji-ko tokenize failed, fallback tokenization used.')
+    logTokenizerFallback(error)
     return fallbackTokenize(text)
   }
 }

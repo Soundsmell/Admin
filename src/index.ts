@@ -1164,7 +1164,8 @@ async function runDailyTask(
       candidates = candidates.filter(member => restrictedSet.has(member.id))
     }
 
-    const bonusTriggered = isScheduledRun && Math.random() < DRAW_CONFIG.BONUS_CHANCE
+    const bonusTriggered =
+      isScheduledRun && Math.random() < DRAW_CONFIG.BONUS_CHANCE
     const totalDrawCount = bonusTriggered
       ? drawCount + DRAW_CONFIG.BONUS_EXTRA_COUNT
       : drawCount
