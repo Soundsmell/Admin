@@ -93,7 +93,8 @@ async function safeCommandReply(
   options: ReplyPayload
 ) {
   if (interaction.deferred || interaction.replied) {
-    return interaction.editReply(options)
+    const { ephemeral, ...rest } = options as any
+    return interaction.editReply(rest)
   }
   return interaction.reply(options)
 }
@@ -241,7 +242,8 @@ function buildAutoDrawSetupSuccessEmbed(args: {
   bonusExtraCount: number
   enabled: boolean
 }) {
-  const { channelId, hour, minute, bonusChance, bonusExtraCount, enabled } = args
+  const { channelId, hour, minute, bonusChance, bonusExtraCount, enabled } =
+    args
   const chanceLabel = `${Math.round(bonusChance * 100)}%`
   const timeLabel = formatTime(hour, minute)
 
@@ -483,9 +485,10 @@ async function deleteAutoDrawConfig(guildId: string) {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is not set.')
   }
-  await settingsPool.query(`DELETE FROM auto_draw_settings WHERE guild_id = $1`, [
-    guildId
-  ])
+  await settingsPool.query(
+    `DELETE FROM auto_draw_settings WHERE guild_id = $1`,
+    [guildId]
+  )
 }
 
 function unscheduleAutoDraw(guildId: string) {
@@ -592,13 +595,22 @@ async function replyOwnerOnly(interaction: ButtonInteraction) {
 }
 
 function hasAdministratorPermission(
-  interaction: ButtonInteraction | ChatInputCommandInteraction | ModalSubmitInteraction
+  interaction:
+    | ButtonInteraction
+    | ChatInputCommandInteraction
+    | ModalSubmitInteraction
 ) {
-  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ?? false
+  return (
+    interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ??
+    false
+  )
 }
 
 async function replyAdminOnly(
-  interaction: ButtonInteraction | ChatInputCommandInteraction | ModalSubmitInteraction
+  interaction:
+    | ButtonInteraction
+    | ChatInputCommandInteraction
+    | ModalSubmitInteraction
 ) {
   if (interaction.isModalSubmit()) {
     await interaction.reply({
@@ -709,7 +721,9 @@ async function handleStatsButton(interaction: ButtonInteraction) {
   })
 
   const member =
-    parsed.scope === 'user' ? await guild.members.fetch(interaction.user.id) : null
+    parsed.scope === 'user'
+      ? await guild.members.fetch(interaction.user.id)
+      : null
   const targetLabel =
     parsed.scope === 'user' ? `<@${interaction.user.id}>` : guild.name
   const customBase = makeCustomBase(
@@ -735,7 +749,12 @@ async function handleStatsButton(interaction: ButtonInteraction) {
     guildCreatedAt: guild?.createdAt ?? undefined,
     guildIconUrl: guild?.iconURL() ?? undefined
   })
-  const row = buildStatsButtons(customBase, nextPage, nextPage > 0, result.hasNext)
+  const row = buildStatsButtons(
+    customBase,
+    nextPage,
+    nextPage > 0,
+    result.hasNext
+  )
 
   if (parsed.scope === 'guild') {
     const participantsBase = makeParticipantsCustomId(
@@ -1238,7 +1257,9 @@ async function runDailyTask(
         ? [randomResult]
         : []
     if (winners.length < totalDrawCount) {
-      await channel.send('추첨 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.')
+      await channel.send(
+        '추첨 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.'
+      )
       return
     }
 
@@ -1246,11 +1267,13 @@ async function runDailyTask(
     const dayNames = ['일', '월', '화', '수', '목', '금', '토']
     const today = new Date()
     const dayName = dayNames[today.getDay()] // 0=일, 1=월, ..., 6=토
-    
+
     // 메시지 출력
-    const bonusLabel = bonusTriggered ? `피의 ${dayName}요일, 3명의 독재자 추가 ` : ''
+    const bonusLabel = bonusTriggered
+      ? `피의 ${dayName}요일, 3명의 독재자 추가 `
+      : ''
     const messageContent = `오늘의 독재자 명단: ${winners.map(w => w.toString()).join(', ')}${bonusLabel}`
-    
+
     await channel.send(messageContent)
   } catch (error) {
     console.error('Error in daily task:', error)
