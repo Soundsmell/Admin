@@ -2,6 +2,7 @@ declare module 'kuromoji-ko' {
   export type KuromojiToken = {
     surface_form?: string
     pos?: string
+    base_form?: string
   }
 
   export type KuromojiTokenizer = {

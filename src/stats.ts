@@ -232,13 +232,28 @@ async function analyzeWords(text: string): Promise<string[]> {
     const tokens = tokenizer.tokenize(text)
     const words: string[] = []
 
-    for (const token of tokens) {
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i]
       const surface = token.surface_form?.trim()
       if (!surface) continue
 
       const pos = token.pos ?? ''
       if (!isValidWord(surface, pos)) continue
-      words.push(surface.toLowerCase())
+
+      // 동사(V) 뒤에 어미(E)가 오면 조합 (예: "먹" + "다" → "먹다")
+      let word = surface.toLowerCase()
+      if (
+        pos.startsWith('V') &&
+        i + 1 < tokens.length &&
+        tokens[i + 1].pos?.startsWith('E')
+      ) {
+        const nextWord = tokens[i + 1].surface_form?.trim()
+        if (nextWord && isValidWord(nextWord, tokens[i + 1].pos ?? '')) {
+          word = (surface + nextWord).toLowerCase()
+          i += 1 // 어미를 스킵
+        }
+      }
+      words.push(word)
     }
 
     return words
