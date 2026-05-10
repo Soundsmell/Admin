@@ -4,13 +4,14 @@
   "description": "Discord bot that selects random users daily and optionally grants admin rights.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc-alias",
     "start": "node dist/index.js",
-    "dev": "nodemon src/index.ts"
+    "dev": "nodemon --exec ts-node -r tsconfig-paths/register src/index.ts"
   },
   "dependencies": {
     "discord.js": "^14.14.0",
     "dotenv": "^16.3.1",
+    "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
     "kuromoji-ko": "^1.0.8",
     "node-cron": "^3.0.3",
@@ -23,6 +24,8 @@
     "@types/pg": "^8.10.2",
     "nodemon": "^3.0.2",
     "ts-node": "^10.9.2",
+    "tsc-alias": "^1.8.17",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.3.3"
   }
 }

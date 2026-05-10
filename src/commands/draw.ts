@@ -12,7 +12,7 @@ import {
   TextInputStyle
 } from 'discord.js'
 import cron from 'node-cron'
-import { AUTO_DRAW_CONFIG, DRAW_CONFIG } from '../config'
+import { AUTO_DRAW_CONFIG, DRAW_CONFIG } from '@/config'
 import {
   buildCronExpression,
   ensureGuildContext,
@@ -22,8 +22,8 @@ import {
   parseDailyTime,
   safeReply,
   safeUpdate
-} from '../utils'
-import type { AutoDrawConfig, AutoDrawRepository } from './postgre'
+} from '@/utils'
+import type { AutoDrawConfig, AutoDrawRepository } from '@/stats/repository'
 
 type AutoDrawPanelState = {
   ownerId: string

@@ -1,4 +1,6 @@
-import { Pool } from 'pg'
+import { and, desc, eq, gte, sql } from 'drizzle-orm'
+import { db, pool } from './db'
+import { autoDrawSettings, messageStats, wordStats } from './schema'
 import { analyzeWords } from './tokenizer'
 import {
   PAGE_SIZE,
@@ -10,16 +12,24 @@ import {
   type StatsWordRow
 } from './types'
 
-const databaseUrl = process.env.DATABASE_URL
-const pool = new Pool({
-  connectionString: databaseUrl,
-  ssl: databaseUrl?.includes('sslmode=require')
-    ? { rejectUnauthorized: false }
-    : undefined
-})
+export type AutoDrawConfig = {
+  guildId: string
+  channelId: string
+  hour: number
+  minute: number
+}
+
+export type AutoDrawRepository = {
+  isConfigured: () => boolean
+  ensureTable: () => Promise<void>
+  getAllConfigs: () => Promise<AutoDrawConfig[]>
+  getConfigByGuildId: (guildId: string) => Promise<AutoDrawConfig | null>
+  upsertConfig: (config: AutoDrawConfig) => Promise<void>
+  deleteConfig: (guildId: string) => Promise<void>
+}
 
 function assertDatabaseUrl() {
-  if (!databaseUrl) {
+  if (!pool) {
     throw new Error('DATABASE_URL is not set in environment variables.')
   }
 }
@@ -47,40 +57,139 @@ function normalizeNonNegativeInt(value: number, fallback = 0) {
   return floored
 }
 
+function buildScopeConditions(scope: Scope, guildId: string, userId: string) {
+  const conditions = [eq(messageStats.guildId, guildId)]
+  if (scope === 'user') {
+    conditions.push(eq(messageStats.userId, userId))
+  }
+  return conditions
+}
+
+function buildWordScopeConditions(
+  scope: Scope,
+  guildId: string,
+  userId: string
+) {
+  const conditions = [eq(wordStats.guildId, guildId)]
+  if (scope === 'user') {
+    conditions.push(eq(wordStats.userId, userId))
+  }
+  return conditions
+}
+
+async function ensureAutoDrawTable() {
+  assertDatabaseUrl()
+  if (!pool) return
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS auto_draw_settings (
+      guild_id TEXT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      hour SMALLINT NOT NULL CHECK (hour BETWEEN 0 AND 23),
+      minute SMALLINT NOT NULL CHECK (minute BETWEEN 0 AND 59),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+}
+
+async function getAllAutoDrawConfigs() {
+  assertDatabaseUrl()
+  if (!db) return []
+
+  const rows = await db.select().from(autoDrawSettings)
+  return rows.map(row => ({
+    guildId: row.guildId,
+    channelId: row.channelId,
+    hour: row.hour,
+    minute: row.minute
+  }))
+}
+
+async function getAutoDrawConfigByGuildId(guildId: string) {
+  assertDatabaseUrl()
+  if (!db) return null
+
+  const rows = await db
+    .select()
+    .from(autoDrawSettings)
+    .where(eq(autoDrawSettings.guildId, guildId))
+    .limit(1)
+
+  const row = rows[0]
+  if (!row) return null
+  return {
+    guildId: row.guildId,
+    channelId: row.channelId,
+    hour: row.hour,
+    minute: row.minute
+  }
+}
+
+async function upsertAutoDrawConfig(config: AutoDrawConfig) {
+  assertDatabaseUrl()
+  if (!db) return
+
+  await db
+    .insert(autoDrawSettings)
+    .values({
+      guildId: config.guildId,
+      channelId: config.channelId,
+      hour: config.hour,
+      minute: config.minute,
+      updatedAt: new Date()
+    })
+    .onConflictDoUpdate({
+      target: autoDrawSettings.guildId,
+      set: {
+        channelId: config.channelId,
+        hour: config.hour,
+        minute: config.minute,
+        updatedAt: new Date()
+      }
+    })
+}
+
+async function deleteAutoDrawConfig(guildId: string) {
+  assertDatabaseUrl()
+  if (!db) return
+
+  await db.delete(autoDrawSettings).where(eq(autoDrawSettings.guildId, guildId))
+}
+
+export const autoDrawRepository: AutoDrawRepository = {
+  isConfigured: () => Boolean(pool),
+  ensureTable: ensureAutoDrawTable,
+  getAllConfigs: getAllAutoDrawConfigs,
+  getConfigByGuildId: getAutoDrawConfigByGuildId,
+  upsertConfig: upsertAutoDrawConfig,
+  deleteConfig: deleteAutoDrawConfig
+}
+
 export async function trackMessage(args: {
   guildId: string
   userId: string
   content: string
 }) {
   assertDatabaseUrl()
+  if (!db) return
 
   const words = await analyzeWords(args.content)
-  const client = await pool.connect()
 
-  try {
-    await client.query('BEGIN')
+  await db.insert(messageStats).values({
+    guildId: args.guildId,
+    userId: args.userId,
+    createdAt: new Date()
+  })
 
-    await client.query(
-      'INSERT INTO message_stats (guild_id, user_id, created_at) VALUES ($1, $2, now())',
-      [args.guildId, args.userId]
+  if (words.length > 0) {
+    await db.insert(wordStats).values(
+      words.map(word => ({
+        guildId: args.guildId,
+        userId: args.userId,
+        word,
+        createdAt: new Date()
+      }))
     )
-
-    if (words.length > 0) {
-      const values = words
-        .map((_, index) => `($1, $2, $${index + 3}, now())`)
-        .join(',')
-      await client.query(
-        `INSERT INTO word_stats (guild_id, user_id, word, created_at) VALUES ${values}`,
-        [args.guildId, args.userId, ...words]
-      )
-    }
-
-    await client.query('COMMIT')
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
   }
 }
 
@@ -94,54 +203,58 @@ export async function fetchStatsPage(args: {
   guildId: string
 }): Promise<StatsPageResult> {
   assertDatabaseUrl()
+  if (!db) {
+    return {
+      totalMessages: 0,
+      words: [],
+      totalCount: 0,
+      hasNext: false
+    }
+  }
 
   const rank = normalizePositiveInt(args.rank, 10)
   const pageSize = normalizePositiveInt(args.pageSize, PAGE_SIZE)
   const page = normalizeNonNegativeInt(args.page, 0)
-
   const start = getPeriodStart(args.period)
-  const baseWhere =
-    args.scope === 'user' ? 'guild_id = $1 AND user_id = $2' : 'guild_id = $1'
-  const baseParams =
-    args.scope === 'user' ? [args.guildId, args.userId] : [args.guildId]
-  const timeClause = start ? ` AND created_at >= $${baseParams.length + 1}` : ''
-  const params = start ? [...baseParams, start] : baseParams
 
-  const messageCountQuery = `
-    SELECT COUNT(*)::int AS count
-    FROM message_stats
-    WHERE ${baseWhere}${timeClause}
-  `
-  const messageCountRes = await pool.query<{ count: number }>(
-    messageCountQuery,
-    params
+  const messageConditions = buildScopeConditions(
+    args.scope,
+    args.guildId,
+    args.userId
   )
-  const totalMessages = messageCountRes.rows[0]?.count ?? 0
+  if (start) messageConditions.push(gte(messageStats.createdAt, start))
+
+  const messageCountRows = await db
+    .select({ count: sql<number>`cast(count(*) as int)` })
+    .from(messageStats)
+    .where(and(...messageConditions))
+  const totalMessages = messageCountRows[0]?.count ?? 0
 
   let participantCount: number | undefined
   if (args.scope === 'guild') {
-    const participantQuery = `
-      SELECT COUNT(DISTINCT user_id)::int AS count
-      FROM message_stats
-      WHERE ${baseWhere}${timeClause}
-    `
-    const participantRes = await pool.query<{ count: number }>(
-      participantQuery,
-      params
-    )
-    participantCount = participantRes.rows[0]?.count ?? 0
+    const participantRows = await db
+      .select({
+        count: sql<number>`cast(count(distinct ${messageStats.userId}) as int)`
+      })
+      .from(messageStats)
+      .where(and(...messageConditions))
+    participantCount = participantRows[0]?.count ?? 0
   }
 
-  const wordCountQuery = `
-    SELECT COUNT(DISTINCT word)::int AS count
-    FROM word_stats
-    WHERE ${baseWhere}${timeClause}
-  `
-  const wordCountRes = await pool.query<{ count: number }>(
-    wordCountQuery,
-    params
+  const wordConditions = buildWordScopeConditions(
+    args.scope,
+    args.guildId,
+    args.userId
   )
-  const totalWordCount = wordCountRes.rows[0]?.count ?? 0
+  if (start) wordConditions.push(gte(wordStats.createdAt, start))
+
+  const totalWordRows = await db
+    .select({
+      count: sql<number>`cast(count(distinct ${wordStats.word}) as int)`
+    })
+    .from(wordStats)
+    .where(and(...wordConditions))
+  const totalWordCount = totalWordRows[0]?.count ?? 0
   const totalCount = Math.min(rank, totalWordCount)
 
   const offset = page * pageSize
@@ -155,25 +268,28 @@ export async function fetchStatsPage(args: {
     }
   }
 
-  const limit = Math.min(pageSize, totalCount - offset)
-  const limitParamIndex = params.length + 1
-  const offsetParamIndex = params.length + 2
-  const wordQuery = `
-    SELECT word, COUNT(*)::int AS count
-    FROM word_stats
-    WHERE ${baseWhere}${timeClause}
-    GROUP BY word
-    ORDER BY count DESC, word ASC
-    LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-  `
+  const wordRows = await db
+    .select({
+      word: wordStats.word,
+      count: sql<number>`cast(count(*) as int)`
+    })
+    .from(wordStats)
+    .where(and(...wordConditions))
+    .groupBy(wordStats.word)
 
-  const wordRes = await pool.query<StatsWordRow>(wordQuery, [
-    ...params,
-    limit,
-    offset
-  ])
-  const words = wordRes.rows
-  const hasNext = offset + limit < totalCount
+  const sortedWords = wordRows
+    .sort((left, right) => {
+      if (left.count !== right.count) return right.count - left.count
+      return left.word.localeCompare(right.word)
+    })
+    .slice(offset, offset + pageSize)
+
+  const words: StatsWordRow[] = sortedWords.map(row => ({
+    word: row.word,
+    count: row.count
+  }))
+
+  const hasNext = offset + pageSize < totalCount
 
   return {
     totalMessages,
@@ -191,21 +307,28 @@ export async function fetchParticipantsPage(args: {
   guildId: string
 }): Promise<ParticipantPageResult> {
   assertDatabaseUrl()
+  if (!db) {
+    return {
+      userIds: [],
+      totalCount: 0,
+      hasNext: false
+    }
+  }
 
   const pageSize = normalizePositiveInt(args.pageSize, PARTICIPANT_PAGE_SIZE)
   const page = normalizeNonNegativeInt(args.page, 0)
-
   const start = getPeriodStart(args.period)
-  const timeClause = start ? ' AND created_at >= $2' : ''
-  const params = start ? [args.guildId, start] : [args.guildId]
 
-  const countQuery = `
-    SELECT COUNT(DISTINCT user_id)::int AS count
-    FROM message_stats
-    WHERE guild_id = $1${timeClause}
-  `
-  const countRes = await pool.query<{ count: number }>(countQuery, params)
-  const totalCount = countRes.rows[0]?.count ?? 0
+  const conditions = [eq(messageStats.guildId, args.guildId)]
+  if (start) conditions.push(gte(messageStats.createdAt, start))
+
+  const countRows = await db
+    .select({
+      count: sql<number>`cast(count(distinct ${messageStats.userId}) as int)`
+    })
+    .from(messageStats)
+    .where(and(...conditions))
+  const totalCount = countRows[0]?.count ?? 0
 
   const offset = page * pageSize
   if (offset >= totalCount) {
@@ -216,24 +339,21 @@ export async function fetchParticipantsPage(args: {
     }
   }
 
-  const limit = Math.min(pageSize, totalCount - offset)
-  const limitParamIndex = params.length + 1
-  const offsetParamIndex = params.length + 2
-  const idsQuery = `
-    SELECT user_id
-    FROM message_stats
-    WHERE guild_id = $1${timeClause}
-    GROUP BY user_id
-    ORDER BY MAX(created_at) DESC
-    LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}
-  `
-  const idsRes = await pool.query<{ user_id: string }>(idsQuery, [
-    ...params,
-    limit,
-    offset
-  ])
-  const userIds = idsRes.rows.map(row => row.user_id)
-  const hasNext = offset + limit < totalCount
+  const groupedRows = await db
+    .select({
+      userId: messageStats.userId,
+      latestAt: sql<Date>`max(${messageStats.createdAt})`
+    })
+    .from(messageStats)
+    .where(and(...conditions))
+    .groupBy(messageStats.userId)
+
+  const sortedRows = groupedRows
+    .sort((left, right) => right.latestAt.getTime() - left.latestAt.getTime())
+    .slice(offset, offset + pageSize)
+
+  const userIds = sortedRows.map(row => row.userId)
+  const hasNext = offset + pageSize < totalCount
 
   return {
     userIds,

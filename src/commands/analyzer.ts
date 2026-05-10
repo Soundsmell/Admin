@@ -20,14 +20,14 @@ import {
   parseStatsCustomId,
   trackMessage,
   type Scope
-} from '../stats'
+} from '@/stats'
 import {
   getCommandOptions,
   getNextPage,
   safeCommandReply,
   safeReply,
   safeUpdate
-} from '../utils'
+} from '@/utils'
 
 type AnalyzerService = {
   handleParticipantsButton: (interaction: ButtonInteraction) => Promise<boolean>

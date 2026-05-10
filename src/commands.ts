@@ -4,97 +4,18 @@ import {
   Client,
   Interaction,
   ModalSubmitInteraction,
-  PermissionFlagsBits,
   REST,
-  Routes,
-  SlashCommandBuilder
+  Routes
 } from 'discord.js'
-import { createAnalyzerService } from './commands/analyzer'
-import { createDrawService } from './commands/draw'
-import { createAutoDrawRepository } from './commands/postgre'
-import { safeReply } from './utils'
+import { createAnalyzerService } from '@/commands/analyzer'
+import { createDrawService } from '@/commands/draw'
+import { autoDrawRepository } from '@/stats/repository'
+import { autoDrawSetupCommand } from '@/commands/autodraw.command'
+import { drawCommand } from '@/commands/draw.command'
+import { statsCommand } from '@/commands/stats.command'
+import { safeReply } from '@/utils'
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('추첨')
-    .setDescription('즉시 랜덤 유저 2명을 추첨합니다.')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addIntegerOption(option =>
-      option
-        .setName('인원')
-        .setDescription('뽑을 인원 수')
-        .setRequired(false)
-        .setMinValue(1)
-        .setMaxValue(10)
-    )
-    .addUserOption(option =>
-      option
-        .setName('제한1')
-        .setDescription('특정 유저만 추첨할 때 사용')
-        .setRequired(false)
-    )
-    .addUserOption(option =>
-      option
-        .setName('제한2')
-        .setDescription('특정 유저만 추첨할 때 사용')
-        .setRequired(false)
-    )
-    .addUserOption(option =>
-      option
-        .setName('제한3')
-        .setDescription('특정 유저만 추첨할 때 사용')
-        .setRequired(false)
-    )
-    .addUserOption(option =>
-      option
-        .setName('제한4')
-        .setDescription('특정 유저만 추첨할 때 사용')
-        .setRequired(false)
-    )
-    .addUserOption(option =>
-      option
-        .setName('제한5')
-        .setDescription('특정 유저만 추첨할 때 사용')
-        .setRequired(false)
-    ),
-  new SlashCommandBuilder()
-    .setName('통계')
-    .setDescription('메시지/단어 통계를 확인합니다')
-    .addUserOption(option =>
-      option
-        .setName('유저')
-        .setDescription('특정 유저의 통계를 보려면 선택 (없으면 서버 통계)')
-        .setRequired(false)
-    )
-    .addStringOption(option =>
-      option
-        .setName('기간')
-        .setDescription('조회 범위')
-        .setRequired(false)
-        .addChoices(
-          { name: '일', value: 'day' },
-          { name: '주', value: 'week' },
-          { name: '월', value: 'month' },
-          { name: '전체', value: 'all' }
-        )
-    )
-    .addIntegerOption(option =>
-      option
-        .setName('순위')
-        .setDescription('표시할 순위 개수')
-        .setRequired(false)
-        .addChoices(
-          { name: '10', value: 10 },
-          { name: '30', value: 30 },
-          { name: '50', value: 50 },
-          { name: '100', value: 100 }
-        )
-    ),
-  new SlashCommandBuilder()
-    .setName('추첨설정')
-    .setDescription('자동 추첨 ON/OFF, 채널, 시간을 설정합니다')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-]
+const commands = [drawCommand, statsCommand, autoDrawSetupCommand]
 
 function isAlreadyHandledError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null || !('code' in error)) {
@@ -155,7 +76,7 @@ async function registerSlashCommands(client: Client) {
 }
 
 export function registerBotHandlers(client: Client) {
-  const repository = createAutoDrawRepository(process.env.DATABASE_URL)
+  const repository = autoDrawRepository
   const drawService = createDrawService({ client, repository })
   const analyzerService = createAnalyzerService()
 
